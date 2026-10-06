@@ -21,7 +21,10 @@ import {
   Info,
   Palette,
   Upload,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Wifi,
+  WifiOff,
+  Users
 } from 'lucide-react';
 
 import studentsWavingImg from './assets/images/students_waving_1791251366893.jpg';
@@ -60,13 +63,15 @@ export interface BackgroundPreset {
 }
 
 export const BACKGROUND_PRESETS: BackgroundPreset[] = [
-  { id: 'cream', name: 'Krem SMADAPAS', bgColor: '#FDFBF7', textColor: '#0f172a', isDark: false, description: 'Sesuai gambar referensi asli' },
-  { id: 'white', name: 'Putih Bersih', bgColor: '#FFFFFF', textColor: '#0f172a', isDark: false, description: 'Terang maksimal untuk proyektor' },
-  { id: 'blue', name: 'Biru Lembut', bgColor: '#F0F5FA', textColor: '#0f172a', isDark: false, description: 'Nuansa akademik tenang' },
-  { id: 'mint', name: 'Hijau Mint', bgColor: '#F2F8F4', textColor: '#0f172a', isDark: false, description: 'Sejuk dan nyaman di mata' },
+  { id: 'cream', name: 'Krem SMADAPAS', bgColor: '#FDFBF7', textColor: '#0f172a', isDark: false, description: 'Sesuai referensi resmi (#FDFBF7)' },
+  { id: 'white', name: 'Putih Bersih', bgColor: '#FFFFFF', textColor: '#0f172a', isDark: false, description: 'Terang jernih maksimal proyektor' },
+  { id: 'blue', name: 'Biru Akademik', bgColor: '#F0F5FA', textColor: '#0f172a', isDark: false, description: 'Nuansa biru sekolah teduh' },
+  { id: 'mint', name: 'Hijau Sejuk', bgColor: '#F2F8F4', textColor: '#0f172a', isDark: false, description: 'Segar dan nyaman di mata' },
+  { id: 'yellow-pastel', name: 'Kuning Pastel', bgColor: '#FEFCE8', textColor: '#0f172a', isDark: false, description: 'Cerah, hangat, dan kontras' },
   { id: 'peach', name: 'Pasir Hangat', bgColor: '#FAF6EE', textColor: '#0f172a', isDark: false, description: 'Tekstur kertas klasik' },
   { id: 'dark-navy', name: 'Midnight Navy', bgColor: '#0F172A', textColor: '#F8FAFC', isDark: true, description: 'Mode gelap elegan untuk aula' },
-  { id: 'dark-slate', name: 'Deep Charcoal', bgColor: '#181E2A', textColor: '#F8FAFC', isDark: true, description: 'Kontras tinggi minim silau' },
+  { id: 'dark-slate', name: 'Deep Charcoal', bgColor: '#181E2A', textColor: '#F8FAFC', isDark: true, description: 'Kontras tinggi bebas silau' },
+  { id: 'dark-emerald', name: 'Emerald Night', bgColor: '#062C22', textColor: '#F8FAFC', isDark: true, description: 'Gelap berwibawa khas hijau' },
 ];
 
 function isColorDark(hexColor: string): boolean {
@@ -240,6 +245,7 @@ export default function App() {
   // UI state
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isPinModalOpen, setIsPinModalOpen] = useState(false);
+  const [isQuickPaletteOpen, setIsQuickPaletteOpen] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -274,9 +280,63 @@ export default function App() {
   const [newPin, setNewPin] = useState('');
   const [showNewPin, setShowNewPin] = useState(false);
 
+  // Multi-device real-time sync state
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
+  const [connectedDevices, setConnectedDevices] = useState<number>(1);
+  const clientIdRef = useRef<string>('client-' + Math.random().toString(36).substring(2, 9));
+  const isRemoteSyncingRef = useRef<boolean>(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
+  const lastUpdatedRef = useRef<number>(Date.now());
+
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Sync rooms and settings to localStorage
+  // Sync rooms and settings to server for multi-device live broadcast
+  const syncStateToServer = (updatedRooms: RoomConfig[], updatedSettings: AppSettings) => {
+    if (isRemoteSyncingRef.current) return;
+
+    // 1. WebSocket broadcast to other devices
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'update_state',
+            rooms: updatedRooms,
+            settings: updatedSettings,
+            source: clientIdRef.current,
+          })
+        );
+      } catch (e) {
+        console.error('Failed to send WS message:', e);
+      }
+    }
+
+    // 2. BroadcastChannel for instant local cross-tab sync
+    if (broadcastChannelRef.current) {
+      try {
+        broadcastChannelRef.current.postMessage({
+          type: 'update_state',
+          rooms: updatedRooms,
+          settings: updatedSettings,
+          source: clientIdRef.current,
+        });
+      } catch {}
+    }
+
+    // 3. HTTP REST fallback
+    try {
+      fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rooms: updatedRooms,
+          settings: updatedSettings,
+        }),
+      }).catch(() => {});
+    } catch {}
+  };
+
+  // Sync rooms and settings to localStorage and trigger server broadcast
   useEffect(() => {
     localStorage.setItem('smadapas_token_rooms', JSON.stringify(rooms));
   }, [rooms]);
@@ -284,6 +344,151 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('smadapas_token_settings', JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    syncStateToServer(rooms, settings);
+  }, [rooms, settings]);
+
+  // Apply state coming from other connected devices
+  const applyRemoteState = (
+    remoteRooms: RoomConfig[],
+    remoteSettings: AppSettings,
+    isInit = false
+  ) => {
+    isRemoteSyncingRef.current = true;
+
+    // Check if any room token actually changed
+    let tokenChanged = false;
+    let changedRoomName = '';
+    if (!isInit) {
+      for (const r of remoteRooms) {
+        const existing = rooms.find((x) => x.id === r.id);
+        if (existing && existing.token !== r.token && r.isActive) {
+          tokenChanged = true;
+          changedRoomName = r.name;
+          break;
+        }
+      }
+    }
+
+    setRooms(remoteRooms);
+    setSettings(remoteSettings);
+    setTempRooms(remoteRooms);
+    setTempSettings(remoteSettings);
+    setLastUpdated(Date.now());
+
+    if (tokenChanged) {
+      triggerConfetti();
+      if (remoteSettings.soundEnabled) {
+        playToneNotification();
+      }
+      showToast(`Token ${changedRoomName || 'Ujian'} diperbarui dari perangkat lain!`);
+    } else if (!isInit) {
+      showToast('Tampilan disinkronkan dengan perangkat lain');
+    }
+
+    setTimeout(() => {
+      isRemoteSyncingRef.current = false;
+    }, 120);
+  };
+
+  // Real-time WebSocket + BroadcastChannel + Poll Lifecycle
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
+    let isUnmounted = false;
+
+    const connectWs = () => {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (isUnmounted) return;
+          setConnectionStatus('connected');
+          ws?.send(JSON.stringify({ type: 'get_state' }));
+        };
+
+        ws.onmessage = (event) => {
+          if (isUnmounted) return;
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'init' && data.state) {
+              lastUpdatedRef.current = data.state.lastUpdated || Date.now();
+              applyRemoteState(data.state.rooms, data.state.settings, true);
+              if (typeof data.connectedDevices === 'number') {
+                setConnectedDevices(data.connectedDevices);
+              }
+            } else if (data.type === 'state_updated' && data.state) {
+              lastUpdatedRef.current = data.state.lastUpdated || Date.now();
+              applyRemoteState(data.state.rooms, data.state.settings, false);
+            } else if (data.type === 'presence' && typeof data.connectedDevices === 'number') {
+              setConnectedDevices(data.connectedDevices);
+            }
+          } catch (e) {
+            console.error('Error handling WS event:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (isUnmounted) return;
+          setConnectionStatus('connecting');
+          reconnectTimer = setTimeout(connectWs, 2500);
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+      } catch {
+        setConnectionStatus('connecting');
+        reconnectTimer = setTimeout(connectWs, 3000);
+      }
+    };
+
+    connectWs();
+
+    // BroadcastChannel for instant same-browser cross-tab sync
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('smadapas_sync_channel');
+        broadcastChannelRef.current = bc;
+        bc.onmessage = (ev) => {
+          if (ev.data && ev.data.rooms && ev.data.settings) {
+            if (ev.data.source !== clientIdRef.current) {
+              applyRemoteState(ev.data.rooms, ev.data.settings, false);
+            }
+          }
+        };
+      }
+    } catch {}
+
+    // Fallback polling every 4 seconds to guarantee sync
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const json = await res.json();
+          if (typeof json.connectedDevices === 'number') {
+            setConnectedDevices(json.connectedDevices);
+          }
+          if (json.state && json.state.lastUpdated > lastUpdatedRef.current) {
+            lastUpdatedRef.current = json.state.lastUpdated;
+            applyRemoteState(json.state.rooms, json.state.settings, false);
+          }
+        }
+      } catch {}
+    }, 4000);
+
+    return () => {
+      isUnmounted = true;
+      clearTimeout(reconnectTimer);
+      clearInterval(pollInterval);
+      if (ws) ws.close();
+      if (broadcastChannelRef.current) broadcastChannelRef.current.close();
+    };
+  }, []);
 
   // Fullscreen change listener
   useEffect(() => {
@@ -311,6 +516,72 @@ export default function App() {
     setTimeout(() => {
       setToastMessage((current) => (current === msg ? null : current));
     }, 2800);
+  };
+
+  // INSTANT Background Color and Theme Switcher:
+  // When user clicks ANY preset or custom color, it immediately changes color on screen!
+  const applyBackgroundColor = (presetId: string, customColor?: string) => {
+    let isTargetDark = false;
+    let targetColor = '';
+
+    if (presetId === 'custom') {
+      targetColor = customColor || tempSettings.customBgColor || settings.customBgColor || '#FDFBF7';
+      isTargetDark = isColorDark(targetColor);
+    } else {
+      const p = BACKGROUND_PRESETS.find((x) => x.id === presetId) || BACKGROUND_PRESETS[0];
+      targetColor = p.bgColor;
+      isTargetDark = p.isDark;
+    }
+
+    const updatedSettings: AppSettings = {
+      ...settings,
+      ...tempSettings,
+      bgPreset: presetId,
+      customBgColor: customColor ?? tempSettings.customBgColor ?? settings.customBgColor ?? '#FDFBF7',
+      theme: isTargetDark ? 'dark' : 'light',
+    };
+
+    // Update both temporary modal state and active live settings immediately
+    setTempSettings(updatedSettings);
+    setSettings(updatedSettings);
+
+    try {
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(updatedSettings));
+    } catch {
+      // ignore
+    }
+
+    const presetObj = BACKGROUND_PRESETS.find((x) => x.id === presetId);
+    const label = presetId === 'custom' ? `Warna Kustom (${targetColor})` : (presetObj?.name || presetId);
+    showToast(`Latar Belakang: ${label}`);
+  };
+
+  const applyPattern = (pattern: 'dots' | 'none') => {
+    const updated: AppSettings = {
+      ...settings,
+      ...tempSettings,
+      bgPattern: pattern,
+    };
+    setTempSettings(updated);
+    setSettings(updated);
+    try {
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
+    } catch {}
+    showToast(`Pola Layar: ${pattern === 'dots' ? 'Titik Halus' : 'Polos Bersih'}`);
+  };
+
+  const removeBgImage = () => {
+    const updated: AppSettings = {
+      ...settings,
+      ...tempSettings,
+      bgImageUrl: null,
+    };
+    setTempSettings(updated);
+    setSettings(updated);
+    try {
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
+    } catch {}
+    showToast('Foto Background Dihapus');
   };
 
   // Handle Admin Button Click
@@ -367,12 +638,18 @@ export default function App() {
     try {
       setIsUploadingBg(true);
       const compressedDataUrl = await compressAndReadImage(file);
-      setTempSettings((prev) => ({
-        ...prev,
+      const updated: AppSettings = {
+        ...settings,
+        ...tempSettings,
         bgImageUrl: compressedDataUrl,
-        bgImageFit: prev.bgImageFit || 'cover',
-        bgImageOpacity: prev.bgImageOpacity ?? 0.85,
-      }));
+        bgImageFit: tempSettings.bgImageFit || 'cover',
+        bgImageOpacity: tempSettings.bgImageOpacity ?? 0.85,
+      };
+      setTempSettings(updated);
+      setSettings(updated);
+      try {
+        localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
+      } catch {}
       showToast('Gambar latar belakang berhasil diunggah!');
     } catch {
       showToast('Gagal memproses gambar. Gunakan file JPG atau PNG.');
@@ -531,12 +808,126 @@ export default function App() {
       {/* ========================================================================= */}
       {/* FLOATING ACTION BAR (Top-Right / Minimal & Discrete for Presenter) */}
       {/* ========================================================================= */}
-      <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-50 hover:opacity-100 transition-opacity duration-200">
+      <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-70 hover:opacity-100 transition-opacity duration-200">
+        {/* Real-time Multi-Device Connection Indicator Badge */}
+        <div
+          title={
+            connectionStatus === 'connected'
+              ? `Tersinkronisasi Real-Time: ${connectedDevices} perangkat aktif terkoneksi`
+              : 'Menyambungkan ke server sinkronisasi multi-perangkat...'
+          }
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-[11px] font-bold backdrop-blur-md border transition-all ${
+            connectionStatus === 'connected'
+              ? isDark
+                ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300'
+                : 'bg-emerald-50/90 border-emerald-300 text-emerald-700 shadow-xs'
+              : 'bg-amber-100/90 dark:bg-amber-950/60 border-amber-300 text-amber-700 dark:text-amber-300 shadow-xs'
+          }`}
+        >
+          {connectionStatus === 'connected' ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              <Wifi className="w-3 h-3 text-emerald-500 shrink-0" />
+              <span className="hidden sm:inline font-mono">
+                {connectedDevices > 1 ? `${connectedDevices} Perangkat` : 'Terkoneksi'}
+              </span>
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-3 h-3 animate-spin text-amber-500 shrink-0" />
+              <span className="hidden sm:inline">Menyambungkan...</span>
+            </>
+          )}
+        </div>
+
+        {/* Quick Palette Background Switcher */}
+        <div className="relative">
+          <button
+            onClick={() => setIsQuickPaletteOpen((v) => !v)}
+            title="Ganti Warna Latar Belakang Cepat"
+            className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border cursor-pointer ${
+              isQuickPaletteOpen
+                ? 'bg-emerald-600 text-white border-emerald-500 shadow-md scale-105'
+                : isDark
+                ? 'bg-slate-800/80 text-amber-300 border-slate-700 hover:bg-slate-700'
+                : 'bg-white/80 text-slate-700 border-slate-200 shadow-sm hover:bg-white hover:text-slate-950'
+            }`}
+          >
+            <Palette className="w-4 h-4 sm:w-5 sm:h-5" />
+          </button>
+
+          {/* Quick Palette Popover Menu */}
+          {isQuickPaletteOpen && (
+            <div className="absolute right-0 top-full mt-2 w-72 sm:w-80 p-3.5 rounded-2xl shadow-2xl border backdrop-blur-xl z-50 animate-token-pop bg-white/95 dark:bg-slate-900/95 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100">
+              <div className="flex items-center justify-between pb-2 mb-2.5 border-b border-slate-200 dark:border-slate-800">
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <Palette className="w-3.5 h-3.5 text-emerald-600" />
+                  Pilih Warna Background
+                </span>
+                <button
+                  onClick={() => setIsQuickPaletteOpen(false)}
+                  className="p-1 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Color Swatches Grid */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {BACKGROUND_PRESETS.map((preset) => {
+                  const isSelected = settings.bgPreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applyBackgroundColor(preset.id)}
+                      className={`flex flex-col items-center gap-1 p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                        isSelected
+                          ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-sm scale-[1.03] bg-emerald-50/50 dark:bg-emerald-950/30'
+                          : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                      }`}
+                    >
+                      <span
+                        className="w-6 h-6 rounded-full border border-black/20 shadow-xs flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: preset.bgColor }}
+                      >
+                        {isSelected && (
+                          <Check className={`w-3.5 h-3.5 ${preset.isDark ? 'text-white' : 'text-emerald-700'}`} />
+                        )}
+                      </span>
+                      <span className="text-[10px] font-bold truncate max-w-full leading-tight">
+                        {preset.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Custom Color Picker in Quick Menu */}
+              <div className="mt-2.5 pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-500">Bebas Custom:</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={settings.customBgColor || '#FDFBF7'}
+                    onChange={(e) => applyBackgroundColor('custom', e.target.value)}
+                    className="w-6 h-6 rounded cursor-pointer border-0 p-0 bg-transparent"
+                    title="Pilih warna bebas"
+                  />
+                  <span className="text-[10px] font-mono text-slate-400">
+                    {settings.customBgColor || '#FDFBF7'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Toggle Theme */}
         <button
           onClick={handleToggleTheme}
           title={isDark ? 'Mode Terang (Tekan D)' : 'Mode Gelap (Tekan D)'}
-          className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border ${
+          className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border cursor-pointer ${
             isDark
               ? 'bg-slate-800/80 text-amber-400 border-slate-700 hover:bg-slate-700'
               : 'bg-white/80 text-slate-700 border-slate-200 shadow-sm hover:bg-white hover:text-slate-950'
@@ -549,7 +940,7 @@ export default function App() {
         <button
           onClick={toggleFullscreen}
           title={isFullscreen ? 'Keluar Fullscreen (Esc / F)' : 'Layar Penuh Proyektor (Tekan F)'}
-          className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border ${
+          className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border cursor-pointer ${
             isDark
               ? 'bg-slate-800/80 text-slate-200 border-slate-700 hover:bg-slate-700'
               : 'bg-white/80 text-slate-700 border-slate-200 shadow-sm hover:bg-white hover:text-slate-950'
@@ -562,7 +953,7 @@ export default function App() {
         <button
           onClick={handleOpenAdminTrigger}
           title="Pengaturan Admin Token (Tekan A)"
-          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full font-semibold text-xs backdrop-blur-md transition-all duration-200 border shadow-sm ${
+          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full font-semibold text-xs backdrop-blur-md transition-all duration-200 border shadow-sm cursor-pointer ${
             isDark
               ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-500'
               : 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600'
@@ -660,27 +1051,122 @@ export default function App() {
           )}
         </div>
 
-        {/* Right: Yellow Cloud Line Decoration + Pink Confetti Dots (Gently Floating) */}
-        <div className="relative w-24 sm:w-36 md:w-44 h-12 sm:h-16 shrink-0 pointer-events-none hidden xs:block animate-gentle-float">
-          <svg viewBox="0 0 160 90" className="w-full h-full overflow-visible">
+        {/* Right: Comic Pop-Art Announcement Balloon with Authentic TANDA SERU (!) (Sesuai Referensi Gambar 234.png) */}
+        <div className="relative w-28 sm:w-36 md:w-44 h-12 sm:h-16 shrink-0 pointer-events-none flex items-center justify-end animate-gentle-float">
+          <svg viewBox="0 0 170 95" className="w-full h-full overflow-visible drop-shadow-sm">
+            {/* Golden Yellow Speech Cloud / Bubble Outline */}
             <path
-              d="M 30 75 Q 15 50 35 25 Q 65 5 105 18 Q 145 2 155 35 Q 165 70 135 85 Q 110 92 90 85 Q 75 90 55 85 Z"
-              fill="none"
+              d="M 35 72 Q 18 52 32 28 Q 58 6 98 16 Q 138 2 152 32 Q 166 65 138 82 Q 115 90 95 83 Q 78 88 58 83 Z"
+              fill={isDark ? 'rgba(245, 184, 46, 0.12)' : 'rgba(254, 240, 138, 0.3)'}
               stroke="#f5b82e"
-              strokeWidth="4"
+              strokeWidth="3.5"
               strokeLinecap="round"
               strokeLinejoin="round"
-              opacity="0.9"
             />
-            {/* Sparkling stars & dots */}
-            <circle cx="85" cy="40" r="3.2" fill="#f87171" opacity="0.9" />
-            <circle cx="94" cy="38" r="2.8" fill="#f87171" opacity="0.85" />
-            <circle cx="90" cy="47" r="3" fill="#f87171" opacity="0.9" />
-            <circle cx="82" cy="46" r="2.5" fill="#f87171" opacity="0.8" />
-            <circle cx="50" cy="62" r="3" fill="#f87171" opacity="0.85" />
-            <circle cx="58" cy="65" r="2.6" fill="#f87171" opacity="0.8" />
-            <circle cx="54" cy="71" r="3" fill="#f87171" opacity="0.85" />
-            <circle cx="46" cy="69" r="2.5" fill="#f87171" opacity="0.75" />
+
+            {/* Comic Action Energy Rays */}
+            <line x1="22" y1="22" x2="12" y2="12" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1="95" y1="8" x2="95" y2="1" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1="156" y1="20" x2="167" y2="12" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+            <line x1="160" y1="55" x2="170" y2="58" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+
+            {/* Main Primary Pop-Art TANDA SERU (!) */}
+            <g transform="translate(85, 18) rotate(4)">
+              {/* 3D Black Drop Shadow */}
+              <path
+                d="M 4 2 L 14 2 L 11 38 L 7 38 Z"
+                fill="#000000"
+                transform="translate(2.5, 2.5)"
+              />
+              <circle cx="9" cy="48" r="5" fill="#000000" transform="translate(2.5, 2.5)" />
+
+              {/* Cyan / Teal 3D Anaglyph Offset (Pop Art Style) */}
+              <path
+                d="M 4 2 L 14 2 L 11 38 L 7 38 Z"
+                fill="#06b6d4"
+                transform="translate(1.2, 1.2)"
+              />
+              <circle cx="9" cy="48" r="5" fill="#06b6d4" transform="translate(1.2, 1.2)" />
+
+              {/* Red Exclamation Mark Body Stem */}
+              <path
+                d="M 4 2 Q 4 0 9 0 Q 14 0 14 2 L 11 38 Q 9 40 7 38 Z"
+                fill="#e81922"
+                stroke="#000000"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+              {/* White Glossy Reflection on Stem */}
+              <path
+                d="M 6 3 L 7.5 3 L 6 34 L 5.2 34 Z"
+                fill="#ffffff"
+                opacity="0.85"
+              />
+
+              {/* Red Exclamation Mark Dot */}
+              <circle
+                cx="9"
+                cy="48"
+                r="4.8"
+                fill="#e81922"
+                stroke="#000000"
+                strokeWidth="1.5"
+              />
+              <circle cx="7.5" cy="46.5" r="1.5" fill="#ffffff" opacity="0.9" />
+            </g>
+
+            {/* Secondary Lively TANDA SERU (!) - Tilted Comic Angle */}
+            <g transform="translate(118, 25) rotate(16) scale(0.72)">
+              <path
+                d="M 4 2 L 13 2 L 10 34 L 7 34 Z"
+                fill="#000000"
+                transform="translate(2, 2)"
+              />
+              <circle cx="8.5" cy="43" r="4.5" fill="#000000" transform="translate(2, 2)" />
+
+              <path
+                d="M 4 2 L 13 2 L 10 34 L 7 34 Z"
+                fill="#06b6d4"
+                transform="translate(1, 1)"
+              />
+              <circle cx="8.5" cy="43" r="4.5" fill="#06b6d4" transform="translate(1, 1)" />
+
+              <path
+                d="M 4 2 Q 4 0 8.5 0 Q 13 0 13 2 L 10 34 Q 8.5 36 7 34 Z"
+                fill="#ef4444"
+                stroke="#000000"
+                strokeWidth="1.5"
+              />
+              <path
+                d="M 5.5 3 L 7 3 L 5.8 28 L 5 28 Z"
+                fill="#ffffff"
+                opacity="0.85"
+              />
+              <circle cx="8.5" cy="43" r="4.2" fill="#ef4444" stroke="#000000" strokeWidth="1.5" />
+              <circle cx="7.2" cy="41.5" r="1.2" fill="#ffffff" opacity="0.9" />
+            </g>
+
+            {/* Mini Accent TANDA SERU (!) on Left for Festive Comic Burst */}
+            <g transform="translate(56, 32) rotate(-14) scale(0.58)">
+              <path
+                d="M 4 2 L 13 2 L 10 32 L 7 32 Z"
+                fill="#000000"
+                transform="translate(2, 2)"
+              />
+              <circle cx="8.5" cy="41" r="4.5" fill="#000000" transform="translate(2, 2)" />
+              <path
+                d="M 4 2 Q 4 0 8.5 0 Q 13 0 13 2 L 10 32 Q 8.5 34 7 32 Z"
+                fill="#f59e0b"
+                stroke="#000000"
+                strokeWidth="1.5"
+              />
+              <circle cx="8.5" cy="41" r="4.2" fill="#f59e0b" stroke="#000000" strokeWidth="1.5" />
+            </g>
+
+            {/* Festive Star & Dot Sparks */}
+            <circle cx="45" cy="62" r="2.8" fill="#ef4444" opacity="0.9" />
+            <circle cx="146" cy="42" r="2.5" fill="#f59e0b" opacity="0.9" />
+            <circle cx="138" cy="70" r="3" fill="#ef4444" opacity="0.85" />
           </svg>
         </div>
       </header>
@@ -1038,6 +1524,27 @@ export default function App() {
 
             {/* Modal Body */}
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
+              {/* Real-time Multi-Device Sync Banner */}
+              <div className="p-3 sm:p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-950/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-lg bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 shrink-0">
+                    <Wifi className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="block text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                      Terkoneksi Antar-Perangkat (Real-Time Sync)
+                    </span>
+                    <span className="block text-[11px] text-slate-600 dark:text-slate-400">
+                      Perubahan token, ruangan, dan background di sini otomatis tersinkron ke proyektor aula dan perangkat lain.
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 self-start sm:self-center shrink-0 px-2.5 py-1 rounded-lg bg-white/90 dark:bg-slate-800/90 border border-emerald-500/30 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 shadow-xs">
+                  <Users className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>{connectedDevices} Perangkat Aktif</span>
+                </div>
+              </div>
+
               {/* Presets Button Bar */}
               <div>
                 <label className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2 block">
@@ -1156,24 +1663,22 @@ export default function App() {
                       <button
                         key={preset.id}
                         type="button"
-                        onClick={() => {
-                          setTempSettings({
-                            ...tempSettings,
-                            bgPreset: preset.id,
-                            theme: preset.isDark ? 'dark' : 'light',
-                          });
-                        }}
-                        className={`flex items-center gap-2 p-2 rounded-xl border text-left transition-all ${
+                        onClick={() => applyBackgroundColor(preset.id)}
+                        className={`flex items-center gap-2 p-2 rounded-xl border text-left transition-all cursor-pointer ${
                           isSelected
-                            ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-sm scale-[1.02]'
-                            : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+                            ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-md scale-[1.02] bg-emerald-50/40 dark:bg-emerald-950/30'
+                            : 'border-slate-200 dark:border-slate-700 hover:border-emerald-400 dark:hover:border-emerald-500 hover:scale-[1.01]'
                         }`}
                         style={{ backgroundColor: preset.isDark ? '#1e293b' : '#ffffff' }}
                       >
                         <span
-                          className="w-5 h-5 rounded-full shrink-0 border border-black/15 shadow-xs"
+                          className="w-5 h-5 rounded-full shrink-0 border border-black/20 shadow-xs flex items-center justify-center"
                           style={{ backgroundColor: preset.bgColor }}
-                        />
+                        >
+                          {isSelected && (
+                            <Check className={`w-3 h-3 ${preset.isDark ? 'text-white' : 'text-emerald-700'}`} />
+                          )}
+                        </span>
                         <div className="min-w-0 flex-1">
                           <span
                             className={`block text-[11px] font-bold truncate leading-tight ${
@@ -1191,7 +1696,7 @@ export default function App() {
                   <div
                     className={`flex items-center gap-2 p-1.5 sm:p-2 rounded-xl border transition-all ${
                       tempSettings.bgPreset === 'custom'
-                        ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-sm scale-[1.02] bg-white dark:bg-slate-800'
+                        ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-md scale-[1.02] bg-white dark:bg-slate-800'
                         : 'border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 hover:border-slate-300'
                     }`}
                   >
@@ -1200,25 +1705,14 @@ export default function App() {
                       value={tempSettings.customBgColor || '#FDFBF7'}
                       onChange={(e) => {
                         const val = e.target.value;
-                        setTempSettings({
-                          ...tempSettings,
-                          bgPreset: 'custom',
-                          customBgColor: val,
-                          theme: isColorDark(val) ? 'dark' : 'light',
-                        });
+                        applyBackgroundColor('custom', val);
                       }}
-                      className="w-6 h-6 rounded-md cursor-pointer border-0 p-0 shrink-0 bg-transparent"
-                      title="Pilih palet warna kustom"
+                      className="w-7 h-7 rounded-md cursor-pointer border-0 p-0 shrink-0 bg-transparent"
+                      title="Pilih palet warna kustom langsung"
                     />
                     <div
                       className="min-w-0 flex-1 cursor-pointer"
-                      onClick={() => {
-                        setTempSettings({
-                          ...tempSettings,
-                          bgPreset: 'custom',
-                          theme: isColorDark(tempSettings.customBgColor || '#FDFBF7') ? 'dark' : 'light',
-                        });
-                      }}
+                      onClick={() => applyBackgroundColor('custom', tempSettings.customBgColor || '#FDFBF7')}
                     >
                       <span className="block text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate">
                         Warna Kustom
@@ -1238,8 +1732,8 @@ export default function App() {
                   <div className="flex gap-1.5">
                     <button
                       type="button"
-                      onClick={() => setTempSettings({ ...tempSettings, bgPattern: 'dots' })}
-                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      onClick={() => applyPattern('dots')}
+                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
                         tempSettings.bgPattern === 'dots'
                           ? 'bg-emerald-600 text-white shadow-xs'
                           : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300'
@@ -1249,8 +1743,8 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTempSettings({ ...tempSettings, bgPattern: 'none' })}
-                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      onClick={() => applyPattern('none')}
+                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
                         tempSettings.bgPattern === 'none'
                           ? 'bg-emerald-600 text-white shadow-xs'
                           : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300'
@@ -1271,7 +1765,7 @@ export default function App() {
                     {tempSettings.bgImageUrl && (
                       <button
                         type="button"
-                        onClick={() => setTempSettings({ ...tempSettings, bgImageUrl: null })}
+                        onClick={removeBgImage}
                         className="text-[10px] text-red-500 hover:text-red-600 font-bold flex items-center gap-1 cursor-pointer"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -1334,8 +1828,12 @@ export default function App() {
                           <div className="flex gap-1.5">
                             <button
                               type="button"
-                              onClick={() => setTempSettings({ ...tempSettings, bgImageFit: 'cover' })}
-                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition ${
+                              onClick={() => {
+                                const updated: AppSettings = { ...settings, ...tempSettings, bgImageFit: 'cover' };
+                                setTempSettings(updated);
+                                setSettings(updated);
+                              }}
+                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition cursor-pointer ${
                                 tempSettings.bgImageFit === 'cover' || !tempSettings.bgImageFit
                                   ? 'bg-emerald-600 text-white'
                                   : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
@@ -1345,8 +1843,12 @@ export default function App() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => setTempSettings({ ...tempSettings, bgImageFit: 'contain' })}
-                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition ${
+                              onClick={() => {
+                                const updated: AppSettings = { ...settings, ...tempSettings, bgImageFit: 'contain' };
+                                setTempSettings(updated);
+                                setSettings(updated);
+                              }}
+                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition cursor-pointer ${
                                 tempSettings.bgImageFit === 'contain'
                                   ? 'bg-emerald-600 text-white'
                                   : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
@@ -1373,9 +1875,12 @@ export default function App() {
                             max="1"
                             step="0.05"
                             value={tempSettings.bgImageOpacity ?? 0.85}
-                            onChange={(e) =>
-                              setTempSettings({ ...tempSettings, bgImageOpacity: parseFloat(e.target.value) })
-                            }
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              const updated: AppSettings = { ...settings, ...tempSettings, bgImageOpacity: val };
+                              setTempSettings(updated);
+                              setSettings(updated);
+                            }}
                             className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                           />
                         </div>
