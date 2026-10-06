@@ -18,7 +18,10 @@ import {
   Eye,
   EyeOff,
   Sparkles,
-  Info
+  Info,
+  Palette,
+  Upload,
+  Image as ImageIcon
 } from 'lucide-react';
 
 import studentsWavingImg from './assets/images/students_waving_1791251366893.jpg';
@@ -39,6 +42,80 @@ interface AppSettings {
   theme: 'light' | 'dark';
   soundEnabled: boolean;
   tokenScale: 'small' | 'medium' | 'large';
+  bgPreset: string;
+  customBgColor: string;
+  bgPattern: 'dots' | 'none';
+  bgImageUrl?: string | null;
+  bgImageFit?: 'cover' | 'contain';
+  bgImageOpacity?: number;
+}
+
+export interface BackgroundPreset {
+  id: string;
+  name: string;
+  bgColor: string;
+  textColor: string;
+  isDark: boolean;
+  description: string;
+}
+
+export const BACKGROUND_PRESETS: BackgroundPreset[] = [
+  { id: 'cream', name: 'Krem SMADAPAS', bgColor: '#FDFBF7', textColor: '#0f172a', isDark: false, description: 'Sesuai gambar referensi asli' },
+  { id: 'white', name: 'Putih Bersih', bgColor: '#FFFFFF', textColor: '#0f172a', isDark: false, description: 'Terang maksimal untuk proyektor' },
+  { id: 'blue', name: 'Biru Lembut', bgColor: '#F0F5FA', textColor: '#0f172a', isDark: false, description: 'Nuansa akademik tenang' },
+  { id: 'mint', name: 'Hijau Mint', bgColor: '#F2F8F4', textColor: '#0f172a', isDark: false, description: 'Sejuk dan nyaman di mata' },
+  { id: 'peach', name: 'Pasir Hangat', bgColor: '#FAF6EE', textColor: '#0f172a', isDark: false, description: 'Tekstur kertas klasik' },
+  { id: 'dark-navy', name: 'Midnight Navy', bgColor: '#0F172A', textColor: '#F8FAFC', isDark: true, description: 'Mode gelap elegan untuk aula' },
+  { id: 'dark-slate', name: 'Deep Charcoal', bgColor: '#181E2A', textColor: '#F8FAFC', isDark: true, description: 'Kontras tinggi minim silau' },
+];
+
+function isColorDark(hexColor: string): boolean {
+  if (!hexColor || !hexColor.startsWith('#')) return false;
+  const hex = hexColor.replace('#', '');
+  if (hex.length !== 6 && hex.length !== 3) return false;
+  const r = parseInt(hex.length === 3 ? hex[0] + hex[0] : hex.slice(0, 2), 16) || 0;
+  const g = parseInt(hex.length === 3 ? hex[1] + hex[1] : hex.slice(2, 4), 16) || 0;
+  const b = parseInt(hex.length === 3 ? hex[2] + hex[2] : hex.slice(4, 6), 16) || 0;
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+  return brightness < 128;
+}
+
+// Client-side image compression for fast localStorage persistence
+function compressAndReadImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxWidth = 1920;
+        const maxHeight = 1080;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth || height > maxHeight) {
+          const ratio = Math.min(maxWidth / width, maxHeight / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(e.target?.result as string);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        resolve(dataUrl);
+      };
+      img.onerror = () => reject(new Error('Gagal memproses gambar'));
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => reject(new Error('Gagal membaca file'));
+    reader.readAsDataURL(file);
+  });
 }
 
 const DEFAULT_ROOMS: RoomConfig[] = [
@@ -55,6 +132,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'light',
   soundEnabled: true,
   tokenScale: 'small',
+  bgPreset: 'cream',
+  customBgColor: '#FDFBF7',
+  bgPattern: 'dots',
+  bgImageUrl: null,
+  bgImageFit: 'cover',
+  bgImageOpacity: 0.85,
 };
 
 function getTokenSizeClasses(scale: 'small' | 'medium' | 'large' = 'small', count: number) {
@@ -163,6 +246,27 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number>(Date.now());
+  const [confettiActive, setConfettiActive] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<string>('');
+
+  // Live ticking clock for exam room presentation
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      const seconds = String(now.getSeconds()).padStart(2, '0');
+      setCurrentTime(`${hours}:${minutes}:${seconds} WIB`);
+    };
+    updateTime();
+    const timer = setInterval(updateTime, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const triggerConfetti = () => {
+    setConfettiActive(true);
+    setTimeout(() => setConfettiActive(false), 2400);
+  };
 
   // Temporary editable state inside admin panel
   const [tempRooms, setTempRooms] = useState<RoomConfig[]>(rooms);
@@ -241,6 +345,7 @@ export default function App() {
     setSettings(updatedSettings);
     setIsAdminOpen(false);
     setLastUpdated(Date.now());
+    triggerConfetti();
     if (updatedSettings.soundEnabled) {
       playToneNotification();
     }
@@ -252,6 +357,29 @@ export default function App() {
     const updated = [...tempRooms];
     updated[index].token = generateRandomToken();
     setTempRooms(updated);
+  };
+
+  // Upload and compress custom background image
+  const [isUploadingBg, setIsUploadingBg] = useState(false);
+  const handleBgFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploadingBg(true);
+      const compressedDataUrl = await compressAndReadImage(file);
+      setTempSettings((prev) => ({
+        ...prev,
+        bgImageUrl: compressedDataUrl,
+        bgImageFit: prev.bgImageFit || 'cover',
+        bgImageOpacity: prev.bgImageOpacity ?? 0.85,
+      }));
+      showToast('Gambar latar belakang berhasil diunggah!');
+    } catch {
+      showToast('Gagal memproses gambar. Gunakan file JPG atau PNG.');
+    } finally {
+      setIsUploadingBg(false);
+      e.target.value = '';
+    }
   };
 
   // Quick Speak Token for Students/Proctors
@@ -272,6 +400,7 @@ export default function App() {
   const handleCopyToken = (id: string, token: string) => {
     navigator.clipboard.writeText(token);
     setCopiedId(id);
+    triggerConfetti();
     showToast(`Token ${token} disalin ke clipboard!`);
     setTimeout(() => setCopiedId(null), 2000);
   };
@@ -291,7 +420,15 @@ export default function App() {
         handleOpenAdminTrigger();
       } else if (e.key === 'd' || e.key === 'D') {
         e.preventDefault();
-        setSettings((prev) => ({ ...prev, theme: prev.theme === 'light' ? 'dark' : 'light' }));
+        setSettings((prev) => {
+          const currentPreset = BACKGROUND_PRESETS.find((p) => p.id === prev.bgPreset);
+          const willBeDark = !(currentPreset ? currentPreset.isDark : prev.theme === 'dark');
+          return {
+            ...prev,
+            theme: willBeDark ? 'dark' : 'light',
+            bgPreset: willBeDark ? 'dark-navy' : 'cream',
+          };
+        });
       } else if (e.key === '-' || e.key === '_') {
         e.preventDefault();
         setSettings((prev) => {
@@ -314,27 +451,90 @@ export default function App() {
 
   // Active rooms for the main display
   const activeRooms = rooms.filter((r) => r.isActive);
-  const isDark = settings.theme === 'dark';
+
+  // Background and dark mode resolution
+  const currentBgPreset = BACKGROUND_PRESETS.find((p) => p.id === settings.bgPreset) || BACKGROUND_PRESETS[0];
+  const effectiveBgColor = settings.bgPreset === 'custom'
+    ? (settings.customBgColor || '#FDFBF7')
+    : currentBgPreset.bgColor;
+  const isDark = settings.bgPreset === 'custom'
+    ? isColorDark(effectiveBgColor)
+    : currentBgPreset.isDark;
+
+  const handleToggleTheme = () => {
+    setSettings((prev) => {
+      const currentPreset = BACKGROUND_PRESETS.find((p) => p.id === prev.bgPreset);
+      const willBeDark = !(currentPreset ? currentPreset.isDark : prev.theme === 'dark');
+      return {
+        ...prev,
+        theme: willBeDark ? 'dark' : 'light',
+        bgPreset: willBeDark ? 'dark-navy' : 'cream',
+      };
+    });
+  };
 
   return (
     <div
       ref={containerRef}
+      style={{ backgroundColor: effectiveBgColor }}
       className={`relative w-screen h-screen max-h-screen select-none overflow-hidden flex flex-col justify-between font-sans transition-colors duration-300 ${
-        isDark ? 'bg-[#0f172a] text-slate-100' : 'bg-[#FDFBF7] text-slate-900'
-      }`}
+        isDark ? 'text-slate-100' : 'text-slate-900'
+      } ${settings.bgPattern === 'dots' ? (isDark ? 'bg-grid-subtle-dark' : 'bg-grid-subtle') : ''}`}
     >
+      {/* Custom Uploaded Background Image Layer */}
+      {settings.bgImageUrl && (
+        <div
+          className="absolute inset-0 pointer-events-none transition-all duration-500 z-0"
+          style={{
+            backgroundImage: `url(${settings.bgImageUrl})`,
+            backgroundSize: settings.bgImageFit || 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            opacity: settings.bgImageOpacity ?? 0.85,
+          }}
+        />
+      )}
+
+      {/* Subtle ambient warm lighting in center */}
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,rgba(251,191,36,0.06)_0%,transparent_65%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(239,68,68,0.08)_0%,transparent_65%)]" />
+
+      {/* Confetti Celebration Overlay */}
+      {confettiActive && (
+        <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden">
+          {Array.from({ length: 30 }).map((_, i) => {
+            const left = (i * 3.33) + (Math.sin(i) * 2);
+            const delay = (i % 6) * 0.12;
+            const size = 6 + (i % 8);
+            const colors = ['#ef4444', '#f59e0b', '#10b981', '#06b6d4', '#8b5cf6', '#ec4899', '#f97316'];
+            const color = colors[i % colors.length];
+            return (
+              <div
+                key={i}
+                className="absolute animate-bounce"
+                style={{
+                  left: `${left}%`,
+                  top: '-20px',
+                  width: `${size}px`,
+                  height: `${size * 1.4}px`,
+                  backgroundColor: color,
+                  borderRadius: i % 2 === 0 ? '50%' : '2px',
+                  transform: `rotate(${i * 24}deg)`,
+                  animation: `tokenPop 0.8s ease-out, gentleFloat 2.2s ease-in forwards`,
+                  animationDelay: `${delay}s`,
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* FLOATING ACTION BAR (Top-Right / Minimal & Discrete for Presenter) */}
       {/* ========================================================================= */}
-      <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-40 hover:opacity-100 transition-opacity duration-200">
+      <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-50 hover:opacity-100 transition-opacity duration-200">
         {/* Toggle Theme */}
         <button
-          onClick={() =>
-            setSettings((prev) => ({
-              ...prev,
-              theme: prev.theme === 'light' ? 'dark' : 'light',
-            }))
-          }
+          onClick={handleToggleTheme}
           title={isDark ? 'Mode Terang (Tekan D)' : 'Mode Gelap (Tekan D)'}
           className={`p-1.5 sm:p-2 rounded-full backdrop-blur-md transition-all duration-200 border ${
             isDark
@@ -379,13 +579,14 @@ export default function App() {
       <header className="relative w-full h-[13vh] min-h-[64px] max-h-[96px] px-4 sm:px-8 lg:px-12 flex items-center justify-between z-20 shrink-0">
         {/* Left: School Logo & Identity */}
         <div className="flex items-center gap-2.5 sm:gap-3.5 group cursor-pointer" onClick={handleOpenAdminTrigger}>
-          {/* Authentic School Circular Badge Icon */}
-          <div className="relative w-11 h-11 sm:w-14 sm:h-14 lg:w-15 lg:h-15 shrink-0 flex items-center justify-center">
-            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-sm">
-              <circle cx="50" cy="50" r="46" fill="none" stroke="#1e3a8a" strokeWidth="3" />
-              <circle cx="50" cy="50" r="42" fill="none" stroke="#2563eb" strokeWidth="1.5" strokeDasharray="3 2" />
-              <circle cx="50" cy="50" r="39" fill="#1e3a8a" />
-              <circle cx="50" cy="50" r="33" fill="#ffffff" />
+          {/* Authentic School Circular Badge Icon with polished metallic ring */}
+          <div className="relative w-11 h-11 sm:w-14 sm:h-14 lg:w-15 lg:h-15 shrink-0 flex items-center justify-center transition-transform group-hover:scale-105">
+            <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
+              <circle cx="50" cy="50" r="47" fill="none" stroke="#f59e0b" strokeWidth="1.5" />
+              <circle cx="50" cy="50" r="45" fill="none" stroke="#1e3a8a" strokeWidth="3" />
+              <circle cx="50" cy="50" r="41" fill="none" stroke="#2563eb" strokeWidth="1.5" strokeDasharray="3 2" />
+              <circle cx="50" cy="50" r="38" fill="#1e3a8a" />
+              <circle cx="50" cy="50" r="32" fill="#ffffff" />
               <path
                 d="M 30 65 Q 40 60 50 64 Q 60 60 70 65 L 70 56 Q 60 51 50 55 Q 40 51 30 56 Z"
                 fill="#2563eb"
@@ -433,23 +634,34 @@ export default function App() {
           </div>
         </div>
 
-        {/* Center: Olive-Green Capsule Banner "TOKEN" */}
-        <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2">
+        {/* Center: Olive-Green Capsule Banner "TOKEN" + Live Digital Clock */}
+        <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 flex flex-col items-center">
           <div
-            className={`px-8 sm:px-14 md:px-20 lg:px-28 py-1.5 sm:py-2.5 rounded-full shadow-sm flex items-center justify-center transition-transform hover:scale-105 ${
+            className={`relative overflow-hidden px-8 sm:px-14 md:px-20 lg:px-28 py-1.5 sm:py-2.5 rounded-full shadow-sm flex items-center justify-center transition-all duration-300 hover:scale-105 ${
               isDark
-                ? 'bg-[#84b860] border-2 border-[#6ea04c] text-black shadow-lg shadow-lime-900/20'
+                ? 'bg-[#84b860] border-2 border-[#6ea04c] text-black shadow-lg shadow-lime-900/30'
                 : 'bg-[#98c775] border border-[#86b563] text-black shadow-sm'
             }`}
           >
-            <h1 className="text-lg sm:text-2xl md:text-3xl font-black tracking-widest text-black">
+            {/* Shimmer glossy light bar across capsule */}
+            <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-transparent via-white/30 to-transparent -translate-x-full animate-shimmer pointer-events-none" />
+
+            <h1 className="relative text-lg sm:text-2xl md:text-3xl font-black tracking-widest text-black">
               {settings.bannerText || 'TOKEN'}
             </h1>
           </div>
+
+          {/* Discreet live clock badge for exam proctors */}
+          {currentTime && (
+            <div className="mt-1 flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-black/5 dark:bg-white/10 text-[10px] sm:text-[11px] font-bold font-mono tracking-wider opacity-75">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span>{currentTime}</span>
+            </div>
+          )}
         </div>
 
-        {/* Right: Yellow Cloud Line Decoration + Pink Confetti Dots */}
-        <div className="relative w-24 sm:w-36 md:w-44 h-12 sm:h-16 shrink-0 pointer-events-none hidden xs:block">
+        {/* Right: Yellow Cloud Line Decoration + Pink Confetti Dots (Gently Floating) */}
+        <div className="relative w-24 sm:w-36 md:w-44 h-12 sm:h-16 shrink-0 pointer-events-none hidden xs:block animate-gentle-float">
           <svg viewBox="0 0 160 90" className="w-full h-full overflow-visible">
             <path
               d="M 30 75 Q 15 50 35 25 Q 65 5 105 18 Q 145 2 155 35 Q 165 70 135 85 Q 110 92 90 85 Q 75 90 55 85 Z"
@@ -458,16 +670,17 @@ export default function App() {
               strokeWidth="4"
               strokeLinecap="round"
               strokeLinejoin="round"
-              opacity="0.85"
+              opacity="0.9"
             />
-            <circle cx="85" cy="40" r="3.2" fill="#f87171" opacity="0.85" />
-            <circle cx="94" cy="38" r="2.8" fill="#f87171" opacity="0.8" />
-            <circle cx="90" cy="47" r="3" fill="#f87171" opacity="0.8" />
-            <circle cx="82" cy="46" r="2.5" fill="#f87171" opacity="0.75" />
-            <circle cx="50" cy="62" r="3" fill="#f87171" opacity="0.8" />
-            <circle cx="58" cy="65" r="2.6" fill="#f87171" opacity="0.75" />
-            <circle cx="54" cy="71" r="3" fill="#f87171" opacity="0.8" />
-            <circle cx="46" cy="69" r="2.5" fill="#f87171" opacity="0.7" />
+            {/* Sparkling stars & dots */}
+            <circle cx="85" cy="40" r="3.2" fill="#f87171" opacity="0.9" />
+            <circle cx="94" cy="38" r="2.8" fill="#f87171" opacity="0.85" />
+            <circle cx="90" cy="47" r="3" fill="#f87171" opacity="0.9" />
+            <circle cx="82" cy="46" r="2.5" fill="#f87171" opacity="0.8" />
+            <circle cx="50" cy="62" r="3" fill="#f87171" opacity="0.85" />
+            <circle cx="58" cy="65" r="2.6" fill="#f87171" opacity="0.8" />
+            <circle cx="54" cy="71" r="3" fill="#f87171" opacity="0.85" />
+            <circle cx="46" cy="69" r="2.5" fill="#f87171" opacity="0.75" />
           </svg>
         </div>
       </header>
@@ -513,23 +726,23 @@ export default function App() {
                     {/* Room Name: Golden Yellow Bold */}
                     <div className="flex items-center gap-2 mb-1 sm:mb-2">
                       <h2
-                        className={`${getRoomNameClasses(settings.tokenScale, activeRooms.length)} ${
+                        className={`${getRoomNameClasses(settings.tokenScale, activeRooms.length)} font-black uppercase tracking-wider transition-colors ${
                           isDark ? 'text-[#f5be38]' : 'text-[#e5a519]'
                         }`}
                         style={{
                           textShadow: isDark
-                            ? '0 2px 8px rgba(245, 190, 56, 0.3)'
-                            : '1px 2px 0px rgba(0,0,0,0.1)',
+                            ? '0 2px 10px rgba(245, 190, 56, 0.4)'
+                            : '1px 2px 0px rgba(0,0,0,0.12)',
                         }}
                       >
                         {room.name}
                       </h2>
                     </div>
 
-                    {/* Token Code: Compact Italic Red 3D Anaglyph Pop-Art */}
+                    {/* Token Code: Compact Italic Red 3D Anaglyph Pop-Art with sleek pedestal */}
                     <div
                       key={`${room.id}-${room.token}-${lastUpdated}`}
-                      className="relative my-1 sm:my-2 transition-transform duration-300 hover:scale-[1.03] cursor-pointer animate-token-pop"
+                      className="relative my-1 sm:my-2 px-4 sm:px-7 py-2 sm:py-3 rounded-2xl bg-white/40 dark:bg-slate-800/40 backdrop-blur-xs border border-amber-500/10 dark:border-slate-700/60 shadow-xs hover:shadow-md transition-all duration-300 hover:scale-[1.03] cursor-pointer animate-token-pop group/token"
                       onClick={() => handleCopyToken(room.id, room.token)}
                       title="Klik untuk menyalin token"
                     >
@@ -551,7 +764,7 @@ export default function App() {
                     </div>
 
                     {/* Quick Action buttons below token */}
-                    <div className="mt-1 sm:mt-2 flex items-center gap-2 opacity-25 hover:opacity-100 transition-opacity">
+                    <div className="mt-1 sm:mt-2 flex items-center gap-2 opacity-30 hover:opacity-100 transition-opacity">
                       <button
                         onClick={() => handleSpeakToken(room.name, room.token)}
                         title="Dengarkan pembacaan token"
@@ -569,13 +782,13 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Thick Vertical Divider Line (Exact to 123.png) */}
+                  {/* Thick Vertical Divider Line (Exact to 123.png with clean architectural tips) */}
                   {hasDividerAfter && (
-                    <div
-                      className={`hidden md:block w-1.5 self-stretch rounded-full my-4 ${
-                        isDark ? 'bg-slate-700' : 'bg-black'
-                      }`}
-                    />
+                    <div className="hidden md:flex flex-col items-center justify-between self-stretch my-2">
+                      <div className={`w-2.5 h-2.5 rotate-45 ${isDark ? 'bg-slate-500' : 'bg-black'}`} />
+                      <div className={`w-1.5 flex-1 rounded-full my-1 ${isDark ? 'bg-slate-700' : 'bg-black'}`} />
+                      <div className={`w-2.5 h-2.5 rotate-45 ${isDark ? 'bg-slate-500' : 'bg-black'}`} />
+                    </div>
                   )}
 
                   {/* Mobile horizontal divider */}
@@ -669,16 +882,17 @@ export default function App() {
           />
 
           {/* Gold Star Medal Sticker Badge at bottom right corner (from 123.png) */}
-          <div className="absolute -bottom-1 right-0 w-11 h-11 sm:w-14 sm:h-14 lg:w-16 lg:h-16 drop-shadow-lg z-20">
-            <svg viewBox="0 0 100 100" className="w-full h-full">
-              <polygon points="35,65 25,95 40,90 50,75" fill="#dc2626" />
-              <polygon points="65,65 75,95 60,90 50,75" fill="#b91c1c" />
-              <circle cx="50" cy="50" r="34" fill="#f59e0b" stroke="#d97706" strokeWidth="3" />
-              <circle cx="50" cy="50" r="28" fill="#fbbf24" />
+          <div className="absolute -bottom-1 right-0 w-12 h-12 sm:w-15 sm:h-15 lg:w-17 lg:h-17 drop-shadow-xl z-20 hover:scale-105 transition-transform">
+            <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible">
+              <polygon points="35,65 24,98 42,91 50,75" fill="#dc2626" />
+              <polygon points="65,65 76,98 58,91 50,75" fill="#b91c1c" />
+              <circle cx="50" cy="50" r="35" fill="#f59e0b" stroke="#d97706" strokeWidth="3" />
+              <circle cx="50" cy="50" r="29" fill="#fbbf24" />
+              <circle cx="50" cy="50" r="26" fill="none" stroke="#fef08a" strokeWidth="1" strokeDasharray="3 2" />
               <polygon
                 points="50,28 55,42 70,42 58,51 63,65 50,56 37,65 42,51 30,42 45,42"
                 fill="#ffffff"
-                opacity="0.9"
+                opacity="0.95"
               />
             </svg>
           </div>
@@ -917,6 +1131,257 @@ export default function App() {
                       </button>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* Menu Ubah Background (Latar Belakang) */}
+              <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Palette className="w-4 h-4 text-emerald-600" />
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200">
+                      Ubah Latar Belakang (Background)
+                    </label>
+                  </div>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Pilih Tema / Warna Bebas
+                  </span>
+                </div>
+
+                {/* Preset Swatches */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {BACKGROUND_PRESETS.map((preset) => {
+                    const isSelected = tempSettings.bgPreset === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setTempSettings({
+                            ...tempSettings,
+                            bgPreset: preset.id,
+                            theme: preset.isDark ? 'dark' : 'light',
+                          });
+                        }}
+                        className={`flex items-center gap-2 p-2 rounded-xl border text-left transition-all ${
+                          isSelected
+                            ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-sm scale-[1.02]'
+                            : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+                        }`}
+                        style={{ backgroundColor: preset.isDark ? '#1e293b' : '#ffffff' }}
+                      >
+                        <span
+                          className="w-5 h-5 rounded-full shrink-0 border border-black/15 shadow-xs"
+                          style={{ backgroundColor: preset.bgColor }}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <span
+                            className={`block text-[11px] font-bold truncate leading-tight ${
+                              preset.isDark ? 'text-slate-100' : 'text-slate-800'
+                            }`}
+                          >
+                            {preset.name}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+
+                  {/* Custom Color Picker Swatch */}
+                  <div
+                    className={`flex items-center gap-2 p-1.5 sm:p-2 rounded-xl border transition-all ${
+                      tempSettings.bgPreset === 'custom'
+                        ? 'ring-2 ring-emerald-500 border-emerald-500 shadow-sm scale-[1.02] bg-white dark:bg-slate-800'
+                        : 'border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 hover:border-slate-300'
+                    }`}
+                  >
+                    <input
+                      type="color"
+                      value={tempSettings.customBgColor || '#FDFBF7'}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setTempSettings({
+                          ...tempSettings,
+                          bgPreset: 'custom',
+                          customBgColor: val,
+                          theme: isColorDark(val) ? 'dark' : 'light',
+                        });
+                      }}
+                      className="w-6 h-6 rounded-md cursor-pointer border-0 p-0 shrink-0 bg-transparent"
+                      title="Pilih palet warna kustom"
+                    />
+                    <div
+                      className="min-w-0 flex-1 cursor-pointer"
+                      onClick={() => {
+                        setTempSettings({
+                          ...tempSettings,
+                          bgPreset: 'custom',
+                          theme: isColorDark(tempSettings.customBgColor || '#FDFBF7') ? 'dark' : 'light',
+                        });
+                      }}
+                    >
+                      <span className="block text-[11px] font-bold text-slate-800 dark:text-slate-200 truncate">
+                        Warna Kustom
+                      </span>
+                      <span className="block text-[9px] font-mono text-slate-400 uppercase">
+                        {tempSettings.customBgColor || '#FDFBF7'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pattern texture selector */}
+                <div className="flex items-center justify-between pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                  <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                    Tekstur Pola Layar:
+                  </span>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setTempSettings({ ...tempSettings, bgPattern: 'dots' })}
+                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition ${
+                        tempSettings.bgPattern === 'dots'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300'
+                      }`}
+                    >
+                      Titik Halus (Dot Grid)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTempSettings({ ...tempSettings, bgPattern: 'none' })}
+                      className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition ${
+                        tempSettings.bgPattern === 'none'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300'
+                      }`}
+                    >
+                      Polos Bersih (Solid)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Upload Background Image Section */}
+                <div className="pt-3 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <ImageIcon className="w-3.5 h-3.5 text-emerald-600" />
+                      Upload Gambar / Foto Background:
+                    </span>
+                    {tempSettings.bgImageUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setTempSettings({ ...tempSettings, bgImageUrl: null })}
+                        className="text-[10px] text-red-500 hover:text-red-600 font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Hapus Foto
+                      </button>
+                    )}
+                  </div>
+
+                  {!tempSettings.bgImageUrl ? (
+                    <label className="flex flex-col items-center justify-center p-3.5 border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-emerald-500 dark:hover:border-emerald-500 rounded-xl cursor-pointer bg-white/50 dark:bg-slate-900/40 hover:bg-emerald-50/50 dark:hover:bg-emerald-950/20 transition-all group">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        onChange={handleBgFileSelect}
+                        disabled={isUploadingBg}
+                        className="hidden"
+                      />
+                      <Upload className="w-5 h-5 text-slate-400 group-hover:text-emerald-600 mb-1 transition-colors" />
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-300 group-hover:text-emerald-600 transition-colors">
+                        {isUploadingBg ? 'Sedang Memproses Gambar...' : 'Klik untuk Pilih / Upload Gambar Background'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 mt-0.5">
+                        Mendukung file JPG, PNG, WEBP (Otomatis dikompresi & pas untuk layar proyektor)
+                      </span>
+                    </label>
+                  ) : (
+                    <div className="p-3 rounded-xl border border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-950/20 space-y-3">
+                      <div className="flex items-center gap-3">
+                        {/* Thumbnail Preview */}
+                        <div className="relative w-16 h-10 rounded-lg overflow-hidden border border-slate-300 dark:border-slate-700 shrink-0 shadow-xs">
+                          <img
+                            src={tempSettings.bgImageUrl}
+                            alt="Preview Background"
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <span className="block text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                            Foto Background Kustom Aktif
+                          </span>
+                          <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 cursor-pointer hover:underline">
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                              onChange={handleBgFileSelect}
+                              className="hidden"
+                            />
+                            Ganti Gambar Lain
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Image Options: Fit and Opacity */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-emerald-200/50 dark:border-emerald-800/40">
+                        {/* Fit Mode */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 dark:text-slate-400 mb-1">
+                            Ukuran Gambar:
+                          </label>
+                          <div className="flex gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setTempSettings({ ...tempSettings, bgImageFit: 'cover' })}
+                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition ${
+                                tempSettings.bgImageFit === 'cover' || !tempSettings.bgImageFit
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              Penuhi Layar (Cover)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setTempSettings({ ...tempSettings, bgImageFit: 'contain' })}
+                              className={`flex-1 py-1 rounded-md text-[10px] font-bold transition ${
+                                tempSettings.bgImageFit === 'contain'
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              Proporsional (Contain)
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Opacity Slider */}
+                        <div>
+                          <div className="flex justify-between items-center mb-1">
+                            <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                              Transparansi Foto:
+                            </label>
+                            <span className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
+                              {Math.round((tempSettings.bgImageOpacity ?? 0.85) * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.2"
+                            max="1"
+                            step="0.05"
+                            value={tempSettings.bgImageOpacity ?? 0.85}
+                            onChange={(e) =>
+                              setTempSettings({ ...tempSettings, bgImageOpacity: parseFloat(e.target.value) })
+                            }
+                            className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

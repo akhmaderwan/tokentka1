@@ -6,35 +6,33 @@
     font-weight: 900;
     font-style: italic;
     color: #e81922;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     text-shadow:
       1.5px 1.5px 0 #000,
       -1px -1px 0 #000,
       1px -1px 0 #000,
       -1px 1px 0 #000,
       3px 3px 0 #000,
-      4px 4px 0 #000,
-      5px 5px 0 #00e5ff,
-      6px 6px 0 #00d2eb,
-      7px 7px 0 #00b8cc;
+      4.5px 4.5px 0 #000,
+      6px 6px 0 #00e5ff,
+      7.5px 7px 0 #00cce6;
   }
 
   .token-3d-text-dark {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     font-weight: 900;
     font-style: italic;
-    color: #ff333a;
-    letter-spacing: 0.04em;
+    color: #ff2b32;
+    letter-spacing: 0.05em;
     text-shadow:
       1.5px 1.5px 0 #000,
       -1px -1px 0 #000,
       1px -1px 0 #000,
       -1px 1px 0 #000,
       3px 3px 0 #000,
-      4px 4px 0 #000,
-      5px 5px 0 #00e5ff,
-      6px 6px 0 #00d2eb,
-      7px 7px 0 #00b8cc;
+      4.5px 4.5px 0 #000,
+      6px 6px 0 #00f0ff,
+      7.5px 7px 0 #00d5e6;
   }
 
   .room-title-text {
@@ -47,18 +45,68 @@
 
 @keyframes tokenPop {
   0% {
-    transform: scale(0.92);
-    opacity: 0.8;
+    transform: scale(0.93) rotate(-0.5deg);
+    opacity: 0.85;
   }
   50% {
-    transform: scale(1.05);
+    transform: scale(1.04) rotate(0.5deg);
   }
   100% {
-    transform: scale(1);
+    transform: scale(1) rotate(0deg);
     opacity: 1;
   }
 }
 
+@keyframes gentleFloat {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes shimmerGleam {
+  0% {
+    transform: translateX(-150%) rotate(25deg);
+  }
+  100% {
+    transform: translateX(250%) rotate(25deg);
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 .animate-token-pop {
-  animation: tokenPop 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: tokenPop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-gentle-float {
+  animation: gentleFloat 4s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  animation: shimmerGleam 3.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 2.5s ease-in-out infinite;
+}
+
+/* Subtle architectural dot grid for high-end backdrop */
+.bg-grid-subtle {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.bg-grid-subtle-dark {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
