@@ -51,6 +51,9 @@ interface AppSettings {
   bgImageUrl?: string | null;
   bgImageFit?: 'cover' | 'contain';
   bgImageOpacity?: number;
+  cloudSyncEnabled?: boolean;
+  cloudSyncUrl?: string;
+  cloudSyncApiKey?: string;
 }
 
 export interface BackgroundPreset {
@@ -143,6 +146,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   bgImageUrl: null,
   bgImageFit: 'cover',
   bgImageOpacity: 0.85,
+  cloudSyncEnabled: false,
+  cloudSyncUrl: '',
+  cloudSyncApiKey: '',
 };
 
 function getTokenSizeClasses(scale: 'small' | 'medium' | 'large' = 'small', count: number) {
@@ -288,10 +294,72 @@ export default function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const lastUpdatedRef = useRef<number>(Date.now());
-
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Sync rooms and settings to server for multi-device live broadcast
+  // Tracks rooms that recently updated tokens for flash highlight animation
+  const [recentlyUpdatedTokens, setRecentlyUpdatedTokens] = useState<Record<string, number>>({});
+
+  const markRoomTokenUpdated = (roomId: string) => {
+    setRecentlyUpdatedTokens((prev) => ({
+      ...prev,
+      [roomId]: Date.now(),
+    }));
+    setTimeout(() => {
+      setRecentlyUpdatedTokens((prev) => {
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      });
+    }, 4500);
+  };
+
+  // Cloud Sync Testing State
+  const [cloudTestState, setCloudTestState] = useState<{
+    status: 'idle' | 'testing' | 'success' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: '',
+  });
+
+  const handleTestCloudConnection = async () => {
+    const targetUrl = tempSettings.cloudSyncUrl?.trim() || '/api/state';
+    setCloudTestState({ status: 'testing', message: 'Sedang menghubungi endpoint...' });
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (tempSettings.cloudSyncApiKey?.trim()) {
+        headers['Authorization'] = `Bearer ${tempSettings.cloudSyncApiKey.trim()}`;
+        headers['X-Master-Key'] = tempSettings.cloudSyncApiKey.trim();
+      }
+
+      const res = await fetch(targetUrl, {
+        method: 'GET',
+        headers,
+      });
+
+      if (res.ok) {
+        setCloudTestState({
+          status: 'success',
+          message: `Koneksi Berhasil! (HTTP ${res.status}) - Cloud Sync siap digunakan.`,
+        });
+        showToast('Koneksi Cloud Sync Berhasil!');
+      } else {
+        setCloudTestState({
+          status: 'error',
+          message: `Gagal terhubung: HTTP ${res.status} ${res.statusText}`,
+        });
+      }
+    } catch {
+      setCloudTestState({
+        status: 'error',
+        message: 'Gagal terhubung: Periksa URL atau koneksi internet.',
+      });
+    }
+  };
+
+  // Sync rooms and settings to server and external cloud
   const syncStateToServer = (updatedRooms: RoomConfig[], updatedSettings: AppSettings) => {
     if (isRemoteSyncingRef.current) return;
 
@@ -334,6 +402,26 @@ export default function App() {
         }),
       }).catch(() => {});
     } catch {}
+
+    // 4. External Cloud Sync (if configured)
+    if (updatedSettings.cloudSyncEnabled && updatedSettings.cloudSyncUrl?.trim()) {
+      try {
+        const cloudHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (updatedSettings.cloudSyncApiKey?.trim()) {
+          cloudHeaders['Authorization'] = `Bearer ${updatedSettings.cloudSyncApiKey.trim()}`;
+          cloudHeaders['X-Master-Key'] = updatedSettings.cloudSyncApiKey.trim();
+        }
+        fetch(updatedSettings.cloudSyncUrl.trim(), {
+          method: 'POST',
+          headers: cloudHeaders,
+          body: JSON.stringify({
+            rooms: updatedRooms,
+            settings: updatedSettings,
+            lastUpdated: Date.now(),
+          }),
+        }).catch(() => {});
+      } catch {}
+    }
   };
 
   // Sync rooms and settings to localStorage and trigger server broadcast
@@ -349,7 +437,7 @@ export default function App() {
     syncStateToServer(rooms, settings);
   }, [rooms, settings]);
 
-  // Apply state coming from other connected devices
+  // Apply state coming from other connected devices or tabs
   const applyRemoteState = (
     remoteRooms: RoomConfig[],
     remoteSettings: AppSettings,
@@ -366,7 +454,7 @@ export default function App() {
         if (existing && existing.token !== r.token && r.isActive) {
           tokenChanged = true;
           changedRoomName = r.name;
-          break;
+          markRoomTokenUpdated(r.id);
         }
       }
     }
@@ -392,7 +480,62 @@ export default function App() {
     }, 120);
   };
 
-  // Real-time WebSocket + BroadcastChannel + Poll Lifecycle
+  // 1. window.addEventListener('storage') - Instant cross-tab sync when localStorage changes
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'smadapas_token_rooms' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          applyRemoteState(parsed, settings, false);
+        } catch {}
+      } else if (e.key === 'smadapas_token_settings' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          applyRemoteState(rooms, parsed, false);
+        } catch {}
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, [rooms, settings]);
+
+  // 2. LocalStorage Polling Fallback every 1 second (1000ms)
+  const lastPolledRoomsStr = useRef<string>(JSON.stringify(rooms));
+  const lastPolledSettingsStr = useRef<string>(JSON.stringify(settings));
+
+  useEffect(() => {
+    const pollLocalTimer = setInterval(() => {
+      try {
+        const storedRooms = localStorage.getItem('smadapas_token_rooms');
+        const storedSettings = localStorage.getItem('smadapas_token_settings');
+
+        let hasChange = false;
+        let nextRooms = rooms;
+        let nextSettings = settings;
+
+        if (storedRooms && storedRooms !== lastPolledRoomsStr.current) {
+          lastPolledRoomsStr.current = storedRooms;
+          nextRooms = JSON.parse(storedRooms);
+          hasChange = true;
+        }
+
+        if (storedSettings && storedSettings !== lastPolledSettingsStr.current) {
+          lastPolledSettingsStr.current = storedSettings;
+          nextSettings = JSON.parse(storedSettings);
+          hasChange = true;
+        }
+
+        if (hasChange && !isRemoteSyncingRef.current) {
+          applyRemoteState(nextRooms, nextSettings, false);
+        }
+      } catch {}
+    }, 1000);
+
+    return () => clearInterval(pollLocalTimer);
+  }, [rooms, settings]);
+
+  // 3. Real-time WebSocket + BroadcastChannel + Poll Lifecycle
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: any = null;
@@ -452,7 +595,7 @@ export default function App() {
     // BroadcastChannel for instant same-browser cross-tab sync
     try {
       if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('smadapas_sync_channel');
+        const bc = new BroadcastChannel('smadapas_token_sync_channel');
         broadcastChannelRef.current = bc;
         bc.onmessage = (ev) => {
           if (ev.data && ev.data.rooms && ev.data.settings) {
@@ -464,7 +607,7 @@ export default function App() {
       }
     } catch {}
 
-    // Fallback polling every 4 seconds to guarantee sync
+    // Fallback polling every 3 seconds to guarantee server sync
     const pollInterval = setInterval(async () => {
       try {
         const res = await fetch('/api/state');
@@ -479,7 +622,27 @@ export default function App() {
           }
         }
       } catch {}
-    }, 4000);
+
+      // If custom cloud sync is enabled, poll it as well
+      if (settings.cloudSyncEnabled && settings.cloudSyncUrl?.trim()) {
+        try {
+          const cloudHeaders: Record<string, string> = {};
+          if (settings.cloudSyncApiKey?.trim()) {
+            cloudHeaders['Authorization'] = `Bearer ${settings.cloudSyncApiKey.trim()}`;
+            cloudHeaders['X-Master-Key'] = settings.cloudSyncApiKey.trim();
+          }
+          const cloudRes = await fetch(settings.cloudSyncUrl.trim(), { headers: cloudHeaders });
+          if (cloudRes.ok) {
+            const cloudJson = await cloudRes.json();
+            const cloudData = cloudJson.record || cloudJson.data || cloudJson;
+            if (cloudData.lastUpdated && cloudData.lastUpdated > lastUpdatedRef.current) {
+              lastUpdatedRef.current = cloudData.lastUpdated;
+              applyRemoteState(cloudData.rooms, cloudData.settings, false);
+            }
+          }
+        } catch {}
+      }
+    }, 3000);
 
     return () => {
       isUnmounted = true;
@@ -488,7 +651,7 @@ export default function App() {
       if (ws) ws.close();
       if (broadcastChannelRef.current) broadcastChannelRef.current.close();
     };
-  }, []);
+  }, [settings.cloudSyncEnabled, settings.cloudSyncUrl, settings.cloudSyncApiKey]);
 
   // Fullscreen change listener
   useEffect(() => {
@@ -612,6 +775,15 @@ export default function App() {
       ...tempSettings,
       pin: newPin.trim().length >= 4 ? newPin.trim() : tempSettings.pin,
     };
+
+    // Mark tokens that changed for highlight flash
+    tempRooms.forEach((tr) => {
+      const prev = rooms.find((r) => r.id === tr.id);
+      if (!prev || prev.token !== tr.token) {
+        markRoomTokenUpdated(tr.id);
+      }
+    });
+
     setRooms(tempRooms);
     setSettings(updatedSettings);
     setIsAdminOpen(false);
@@ -628,6 +800,7 @@ export default function App() {
     const updated = [...tempRooms];
     updated[index].token = generateRandomToken();
     setTempRooms(updated);
+    markRoomTokenUpdated(updated[index].id);
   };
 
   // Upload and compress custom background image
@@ -1225,29 +1398,53 @@ export default function App() {
                       </h2>
                     </div>
 
-                    {/* Token Code: Compact Italic Red 3D Anaglyph Pop-Art with sleek pedestal */}
-                    <div
-                      key={`${room.id}-${room.token}-${lastUpdated}`}
-                      className="relative my-1 sm:my-2 px-4 sm:px-7 py-2 sm:py-3 rounded-2xl bg-white/40 dark:bg-slate-800/40 backdrop-blur-xs border border-amber-500/10 dark:border-slate-700/60 shadow-xs hover:shadow-md transition-all duration-300 hover:scale-[1.03] cursor-pointer animate-token-pop group/token"
-                      onClick={() => handleCopyToken(room.id, room.token)}
-                      title="Klik untuk menyalin token"
-                    >
-                      <span
-                        className={`inline-block select-all leading-none ${
-                          isDark ? 'token-3d-text-dark' : 'token-3d-text'
-                        } ${getTokenSizeClasses(settings.tokenScale, activeRooms.length)} tracking-wider`}
-                      >
-                        {room.token}
-                      </span>
+                    {/* Token Code: Compact Italic Red 3D Anaglyph Pop-Art with sleek pedestal & flash update */}
+                    {(() => {
+                      const isRecentlyUpdated = Boolean(recentlyUpdatedTokens[room.id]);
+                      return (
+                        <div
+                          key={`${room.id}-${room.token}-${lastUpdated}`}
+                          className={`relative my-1 sm:my-2 px-4 sm:px-7 py-2 sm:py-3 rounded-2xl backdrop-blur-xs border transition-all duration-300 hover:scale-[1.03] cursor-pointer group/token ${
+                            isRecentlyUpdated
+                              ? isDark
+                                ? 'animate-token-flash-dark ring-4 ring-amber-400 bg-amber-950/70 border-amber-400 shadow-2xl'
+                                : 'animate-token-flash ring-4 ring-amber-500 bg-amber-100/95 border-amber-400 shadow-2xl'
+                              : isDark
+                              ? 'bg-slate-800/40 border-slate-700/60 shadow-xs hover:shadow-md animate-token-pop'
+                              : 'bg-white/40 border-amber-500/10 shadow-xs hover:shadow-md animate-token-pop'
+                          }`}
+                          onClick={() => handleCopyToken(room.id, room.token)}
+                          title="Klik untuk menyalin token"
+                        >
+                          {/* Animated Badge if Token Was Recently Updated */}
+                          {isRecentlyUpdated && (
+                            <div className="absolute -top-3.5 left-1/2 -translate-x-1/2 z-30 px-3 py-0.5 rounded-full bg-gradient-to-r from-red-600 via-amber-500 to-emerald-500 text-white text-[10px] font-black tracking-widest uppercase shadow-xl border-2 border-yellow-200 animate-bounce flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+                              <Sparkles className="w-3.5 h-3.5 text-yellow-200 animate-spin" />
+                              <span>TOKEN DIPERBARUI!</span>
+                            </div>
+                          )}
 
-                      {/* Copied indicator tooltip */}
-                      {copiedId === room.id && (
-                        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black text-white text-[11px] font-bold px-2.5 py-0.5 rounded shadow-lg animate-bounce flex items-center gap-1">
-                          <Check className="w-3 h-3 text-emerald-400" />
-                          <span>Disalin!</span>
+                          <span
+                            className={`inline-block select-all leading-none ${
+                              isRecentlyUpdated ? 'animate-token-text-burst' : ''
+                            } ${isDark ? 'token-3d-text-dark' : 'token-3d-text'} ${getTokenSizeClasses(
+                              settings.tokenScale,
+                              activeRooms.length
+                            )} tracking-wider`}
+                          >
+                            {room.token}
+                          </span>
+
+                          {/* Copied indicator tooltip */}
+                          {copiedId === room.id && (
+                            <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black text-white text-[11px] font-bold px-2.5 py-0.5 rounded shadow-lg animate-bounce flex items-center gap-1">
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span>Disalin!</span>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
+                      );
+                    })()}
 
                     {/* Quick Action buttons below token */}
                     <div className="mt-1 sm:mt-2 flex items-center gap-2 opacity-30 hover:opacity-100 transition-opacity">
@@ -2105,6 +2302,114 @@ export default function App() {
                   >
                     {tempSettings.soundEnabled ? 'Aktif' : 'Mati'}
                   </button>
+                </div>
+
+                {/* Cloud Sync Configuration (Opsional - Sinkronisasi Beda Laptop / HP) */}
+                <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Wifi className="w-4 h-4 text-emerald-600" />
+                      <div>
+                        <span className="text-xs font-bold block">
+                          Sinkronisasi Cloud Antar-Perangkat (Opsional)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Kontrol token dari HP / Laptop terpisah ke laptop proyektor aula
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTempSettings({
+                          ...tempSettings,
+                          cloudSyncEnabled: !tempSettings.cloudSyncEnabled,
+                        })
+                      }
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                        tempSettings.cloudSyncEnabled
+                          ? 'bg-emerald-600 text-white'
+                          : isDark
+                          ? 'bg-slate-700 text-slate-300'
+                          : 'bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      {tempSettings.cloudSyncEnabled ? 'Cloud Sync Aktif' : 'Nonaktif'}
+                    </button>
+                  </div>
+
+                  {tempSettings.cloudSyncEnabled && (
+                    <div className="pt-2 border-t border-slate-200/80 dark:border-slate-700 space-y-2.5 animate-token-pop">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                          URL Database / API Endpoint (Kosongkan untuk memakai server internal bawaan)
+                        </label>
+                        <input
+                          type="text"
+                          value={tempSettings.cloudSyncUrl || ''}
+                          onChange={(e) =>
+                            setTempSettings({ ...tempSettings, cloudSyncUrl: e.target.value })
+                          }
+                          placeholder="Default: /api/state (atau https://... Firebase / JSONBin / Supabase)"
+                          className={`w-full px-3 py-1.5 text-xs rounded-lg border outline-none font-mono ${
+                            isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-300'
+                          }`}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                          API Key / Auth Token (Opsional jika endpoint publik)
+                        </label>
+                        <input
+                          type="password"
+                          value={tempSettings.cloudSyncApiKey || ''}
+                          onChange={(e) =>
+                            setTempSettings({ ...tempSettings, cloudSyncApiKey: e.target.value })
+                          }
+                          placeholder="Masukkan token/kunci autentikasi jika ada..."
+                          className={`w-full px-3 py-1.5 text-xs rounded-lg border outline-none font-mono ${
+                            isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-300'
+                          }`}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleTestCloudConnection}
+                          disabled={cloudTestState.status === 'testing'}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          {cloudTestState.status === 'testing' ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              <span>Sedang Mengetes...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Wifi className="w-3.5 h-3.5" />
+                              <span>Tes Koneksi Cloud</span>
+                            </>
+                          )}
+                        </button>
+
+                        {cloudTestState.message && (
+                          <span
+                            className={`text-[11px] font-semibold truncate ${
+                              cloudTestState.status === 'success'
+                                ? 'text-emerald-600 dark:text-emerald-400'
+                                : cloudTestState.status === 'error'
+                                ? 'text-red-500'
+                                : 'text-slate-500'
+                            }`}
+                          >
+                            {cloudTestState.message}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Change PIN option */}
