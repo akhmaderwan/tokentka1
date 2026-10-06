@@ -1,0 +1,41 @@
+{
+  "rooms": [
+    {
+      "id": "aula-2",
+      "name": "AULA 2",
+      "token": "ZMQOUL",
+      "isActive": true
+    },
+    {
+      "id": "aula-1",
+      "name": "AULA 1",
+      "token": "OVBOWK",
+      "isActive": true
+    },
+    {
+      "id": "multimedia",
+      "name": "MULTIMEDIA",
+      "token": "KTR7LP",
+      "isActive": false
+    }
+  ],
+  "settings": {
+    "pin": "1234",
+    "bannerText": "TOKEN",
+    "footerLeft": "TIM TKA",
+    "footerRight": "SMADAPAS 2026",
+    "theme": "light",
+    "soundEnabled": true,
+    "tokenScale": "small",
+    "bgPreset": "cream",
+    "customBgColor": "#FDFBF7",
+    "bgPattern": "dots",
+    "bgImageUrl": null,
+    "bgImageFit": "cover",
+    "bgImageOpacity": 0.85,
+    "cloudSyncEnabled": false,
+    "cloudSyncUrl": "",
+    "cloudSyncApiKey": ""
+  },
+  "lastUpdated": 1791275220992
+}

@@ -289,8 +289,10 @@ export default function App() {
   // Multi-device real-time sync state
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
   const [connectedDevices, setConnectedDevices] = useState<number>(1);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const clientIdRef = useRef<string>('client-' + Math.random().toString(36).substring(2, 9));
   const isRemoteSyncingRef = useRef<boolean>(false);
+  const hasInitialLoadedRef = useRef<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
   const lastUpdatedRef = useRef<number>(Date.now());
@@ -359,11 +361,21 @@ export default function App() {
     }
   };
 
-  // Sync rooms and settings to server and external cloud
+  // Explicit broadcast function called ONLY when a user actively changes settings or tokens
   const syncStateToServer = (updatedRooms: RoomConfig[], updatedSettings: AppSettings) => {
     if (isRemoteSyncingRef.current) return;
+    const now = Date.now();
+    lastUpdatedRef.current = now;
 
-    // 1. WebSocket broadcast to other devices
+    // Cache locally
+    try {
+      localStorage.setItem('smadapas_token_rooms', JSON.stringify(updatedRooms));
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(updatedSettings));
+      lastPolledRoomsStr.current = JSON.stringify(updatedRooms);
+      lastPolledSettingsStr.current = JSON.stringify(updatedSettings);
+    } catch {}
+
+    // 1. WebSocket broadcast to all connected devices instantly (< 50ms)
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(
@@ -371,6 +383,7 @@ export default function App() {
             type: 'update_state',
             rooms: updatedRooms,
             settings: updatedSettings,
+            lastUpdated: now,
             source: clientIdRef.current,
           })
         );
@@ -379,19 +392,20 @@ export default function App() {
       }
     }
 
-    // 2. BroadcastChannel for instant local cross-tab sync
+    // 2. BroadcastChannel for instant local cross-tab sync in same browser
     if (broadcastChannelRef.current) {
       try {
         broadcastChannelRef.current.postMessage({
           type: 'update_state',
           rooms: updatedRooms,
           settings: updatedSettings,
+          lastUpdated: now,
           source: clientIdRef.current,
         });
       } catch {}
     }
 
-    // 3. HTTP REST fallback
+    // 3. HTTP REST fallback with persistence
     try {
       fetch('/api/state', {
         method: 'POST',
@@ -399,6 +413,7 @@ export default function App() {
         body: JSON.stringify({
           rooms: updatedRooms,
           settings: updatedSettings,
+          lastUpdated: now,
         }),
       }).catch(() => {});
     } catch {}
@@ -417,14 +432,14 @@ export default function App() {
           body: JSON.stringify({
             rooms: updatedRooms,
             settings: updatedSettings,
-            lastUpdated: Date.now(),
+            lastUpdated: now,
           }),
         }).catch(() => {});
       } catch {}
     }
   };
 
-  // Sync rooms and settings to localStorage and trigger server broadcast
+  // Sync rooms and settings to localStorage
   useEffect(() => {
     localStorage.setItem('smadapas_token_rooms', JSON.stringify(rooms));
   }, [rooms]);
@@ -432,10 +447,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('smadapas_token_settings', JSON.stringify(settings));
   }, [settings]);
-
-  useEffect(() => {
-    syncStateToServer(rooms, settings);
-  }, [rooms, settings]);
 
   // Apply state coming from other connected devices or tabs
   const applyRemoteState = (
@@ -448,14 +459,12 @@ export default function App() {
     // Check if any room token actually changed
     let tokenChanged = false;
     let changedRoomName = '';
-    if (!isInit) {
-      for (const r of remoteRooms) {
-        const existing = rooms.find((x) => x.id === r.id);
-        if (existing && existing.token !== r.token && r.isActive) {
-          tokenChanged = true;
-          changedRoomName = r.name;
-          markRoomTokenUpdated(r.id);
-        }
+    for (const r of remoteRooms) {
+      const existing = rooms.find((x) => x.id === r.id);
+      if (existing && existing.token !== r.token && r.isActive) {
+        tokenChanged = true;
+        changedRoomName = r.name;
+        markRoomTokenUpdated(r.id);
       }
     }
 
@@ -465,7 +474,14 @@ export default function App() {
     setTempSettings(remoteSettings);
     setLastUpdated(Date.now());
 
-    if (tokenChanged) {
+    try {
+      localStorage.setItem('smadapas_token_rooms', JSON.stringify(remoteRooms));
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(remoteSettings));
+      lastPolledRoomsStr.current = JSON.stringify(remoteRooms);
+      lastPolledSettingsStr.current = JSON.stringify(remoteSettings);
+    } catch {}
+
+    if (tokenChanged && !isInit) {
       triggerConfetti();
       if (remoteSettings.soundEnabled) {
         playToneNotification();
@@ -477,10 +493,47 @@ export default function App() {
 
     setTimeout(() => {
       isRemoteSyncingRef.current = false;
-    }, 120);
+    }, 400);
   };
 
-  // 1. window.addEventListener('storage') - Instant cross-tab sync when localStorage changes
+  // Polling tracker references
+  const lastPolledRoomsStr = useRef<string>(JSON.stringify(rooms));
+  const lastPolledSettingsStr = useRef<string>(JSON.stringify(settings));
+
+  // 1. Fetch server state with force option
+  const fetchServerState = async (silent: boolean = true) => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/state?t=' + Date.now());
+      if (res.ok) {
+        const json = await res.json();
+        if (typeof json.connectedDevices === 'number') {
+          setConnectedDevices(Math.max(1, json.connectedDevices));
+        }
+        if (json.state && Array.isArray(json.state.rooms)) {
+          const isNewer = json.state.lastUpdated > lastUpdatedRef.current;
+          if (isNewer || !hasInitialLoadedRef.current) {
+            hasInitialLoadedRef.current = true;
+            lastUpdatedRef.current = json.state.lastUpdated || Date.now();
+            applyRemoteState(json.state.rooms, json.state.settings, !isNewer);
+            if (!silent) {
+              showToast('Data token disinkronkan dari server!');
+            }
+          } else if (!silent) {
+            showToast('Data sudah versi terbaru');
+          }
+        }
+      } else if (!silent) {
+        showToast('Gagal menghubungi server sinkronisasi');
+      }
+    } catch (e) {
+      if (!silent) showToast('Gagal melakukan sinkronisasi');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // 2. window.addEventListener('storage') - Instant cross-tab sync when localStorage changes
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'smadapas_token_rooms' && e.newValue) {
@@ -500,46 +553,14 @@ export default function App() {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, [rooms, settings]);
 
-  // 2. LocalStorage Polling Fallback every 1 second (1000ms)
-  const lastPolledRoomsStr = useRef<string>(JSON.stringify(rooms));
-  const lastPolledSettingsStr = useRef<string>(JSON.stringify(settings));
-
-  useEffect(() => {
-    const pollLocalTimer = setInterval(() => {
-      try {
-        const storedRooms = localStorage.getItem('smadapas_token_rooms');
-        const storedSettings = localStorage.getItem('smadapas_token_settings');
-
-        let hasChange = false;
-        let nextRooms = rooms;
-        let nextSettings = settings;
-
-        if (storedRooms && storedRooms !== lastPolledRoomsStr.current) {
-          lastPolledRoomsStr.current = storedRooms;
-          nextRooms = JSON.parse(storedRooms);
-          hasChange = true;
-        }
-
-        if (storedSettings && storedSettings !== lastPolledSettingsStr.current) {
-          lastPolledSettingsStr.current = storedSettings;
-          nextSettings = JSON.parse(storedSettings);
-          hasChange = true;
-        }
-
-        if (hasChange && !isRemoteSyncingRef.current) {
-          applyRemoteState(nextRooms, nextSettings, false);
-        }
-      } catch {}
-    }, 1000);
-
-    return () => clearInterval(pollLocalTimer);
-  }, [rooms, settings]);
-
-  // 3. Real-time WebSocket + BroadcastChannel + Poll Lifecycle
+  // 3. Real-time WebSocket + Polling Lifecycle
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: any = null;
     let isUnmounted = false;
+
+    // Immediately fetch authoritative server state on mount
+    fetchServerState(true);
 
     const connectWs = () => {
       try {
@@ -552,6 +573,7 @@ export default function App() {
           if (isUnmounted) return;
           setConnectionStatus('connected');
           ws?.send(JSON.stringify({ type: 'get_state' }));
+          fetchServerState(true);
         };
 
         ws.onmessage = (event) => {
@@ -562,13 +584,13 @@ export default function App() {
               lastUpdatedRef.current = data.state.lastUpdated || Date.now();
               applyRemoteState(data.state.rooms, data.state.settings, true);
               if (typeof data.connectedDevices === 'number') {
-                setConnectedDevices(data.connectedDevices);
+                setConnectedDevices(Math.max(1, data.connectedDevices));
               }
             } else if (data.type === 'state_updated' && data.state) {
               lastUpdatedRef.current = data.state.lastUpdated || Date.now();
               applyRemoteState(data.state.rooms, data.state.settings, false);
             } else if (data.type === 'presence' && typeof data.connectedDevices === 'number') {
-              setConnectedDevices(data.connectedDevices);
+              setConnectedDevices(Math.max(1, data.connectedDevices));
             }
           } catch (e) {
             console.error('Error handling WS event:', e);
@@ -578,7 +600,7 @@ export default function App() {
         ws.onclose = () => {
           if (isUnmounted) return;
           setConnectionStatus('connecting');
-          reconnectTimer = setTimeout(connectWs, 2500);
+          reconnectTimer = setTimeout(connectWs, 2000);
         };
 
         ws.onerror = () => {
@@ -586,7 +608,7 @@ export default function App() {
         };
       } catch {
         setConnectionStatus('connecting');
-        reconnectTimer = setTimeout(connectWs, 3000);
+        reconnectTimer = setTimeout(connectWs, 2500);
       }
     };
 
@@ -607,21 +629,9 @@ export default function App() {
       }
     } catch {}
 
-    // Fallback polling every 3 seconds to guarantee server sync
-    const pollInterval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const json = await res.json();
-          if (typeof json.connectedDevices === 'number') {
-            setConnectedDevices(json.connectedDevices);
-          }
-          if (json.state && json.state.lastUpdated > lastUpdatedRef.current) {
-            lastUpdatedRef.current = json.state.lastUpdated;
-            applyRemoteState(json.state.rooms, json.state.settings, false);
-          }
-        }
-      } catch {}
+    // Polling fallback every 1.5 seconds (1500ms) to guarantee cross-device sync even if WS drops
+    const pollInterval = setInterval(() => {
+      fetchServerState(true);
 
       // If custom cloud sync is enabled, poll it as well
       if (settings.cloudSyncEnabled && settings.cloudSyncUrl?.trim()) {
@@ -631,18 +641,19 @@ export default function App() {
             cloudHeaders['Authorization'] = `Bearer ${settings.cloudSyncApiKey.trim()}`;
             cloudHeaders['X-Master-Key'] = settings.cloudSyncApiKey.trim();
           }
-          const cloudRes = await fetch(settings.cloudSyncUrl.trim(), { headers: cloudHeaders });
-          if (cloudRes.ok) {
-            const cloudJson = await cloudRes.json();
-            const cloudData = cloudJson.record || cloudJson.data || cloudJson;
-            if (cloudData.lastUpdated && cloudData.lastUpdated > lastUpdatedRef.current) {
-              lastUpdatedRef.current = cloudData.lastUpdated;
-              applyRemoteState(cloudData.rooms, cloudData.settings, false);
-            }
-          }
+          fetch(settings.cloudSyncUrl.trim(), { headers: cloudHeaders })
+            .then((r) => r.json())
+            .then((cloudJson) => {
+              const cloudData = cloudJson.record || cloudJson.data || cloudJson;
+              if (cloudData.lastUpdated && cloudData.lastUpdated > lastUpdatedRef.current) {
+                lastUpdatedRef.current = cloudData.lastUpdated;
+                applyRemoteState(cloudData.rooms, cloudData.settings, false);
+              }
+            })
+            .catch(() => {});
         } catch {}
       }
-    }, 3000);
+    }, 1500);
 
     return () => {
       isUnmounted = true;
@@ -707,12 +718,7 @@ export default function App() {
     // Update both temporary modal state and active live settings immediately
     setTempSettings(updatedSettings);
     setSettings(updatedSettings);
-
-    try {
-      localStorage.setItem('smadapas_token_settings', JSON.stringify(updatedSettings));
-    } catch {
-      // ignore
-    }
+    syncStateToServer(rooms, updatedSettings);
 
     const presetObj = BACKGROUND_PRESETS.find((x) => x.id === presetId);
     const label = presetId === 'custom' ? `Warna Kustom (${targetColor})` : (presetObj?.name || presetId);
@@ -727,9 +733,7 @@ export default function App() {
     };
     setTempSettings(updated);
     setSettings(updated);
-    try {
-      localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
-    } catch {}
+    syncStateToServer(rooms, updated);
     showToast(`Pola Layar: ${pattern === 'dots' ? 'Titik Halus' : 'Polos Bersih'}`);
   };
 
@@ -741,9 +745,7 @@ export default function App() {
     };
     setTempSettings(updated);
     setSettings(updated);
-    try {
-      localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
-    } catch {}
+    syncStateToServer(rooms, updated);
     showToast('Foto Background Dihapus');
   };
 
@@ -788,6 +790,7 @@ export default function App() {
     setSettings(updatedSettings);
     setIsAdminOpen(false);
     setLastUpdated(Date.now());
+    syncStateToServer(tempRooms, updatedSettings);
     triggerConfetti();
     if (updatedSettings.soundEnabled) {
       playToneNotification();
@@ -820,9 +823,7 @@ export default function App() {
       };
       setTempSettings(updated);
       setSettings(updated);
-      try {
-        localStorage.setItem('smadapas_token_settings', JSON.stringify(updated));
-      } catch {}
+      syncStateToServer(rooms, updated);
       showToast('Gambar latar belakang berhasil diunggah!');
     } catch {
       showToast('Gagal memproses gambar. Gunakan file JPG atau PNG.');
@@ -912,15 +913,16 @@ export default function App() {
     : currentBgPreset.isDark;
 
   const handleToggleTheme = () => {
-    setSettings((prev) => {
-      const currentPreset = BACKGROUND_PRESETS.find((p) => p.id === prev.bgPreset);
-      const willBeDark = !(currentPreset ? currentPreset.isDark : prev.theme === 'dark');
-      return {
-        ...prev,
-        theme: willBeDark ? 'dark' : 'light',
-        bgPreset: willBeDark ? 'dark-navy' : 'cream',
-      };
-    });
+    const currentPreset = BACKGROUND_PRESETS.find((p) => p.id === settings.bgPreset);
+    const willBeDark = !(currentPreset ? currentPreset.isDark : settings.theme === 'dark');
+    const updated: AppSettings = {
+      ...settings,
+      theme: willBeDark ? 'dark' : 'light',
+      bgPreset: willBeDark ? 'dark-navy' : 'cream',
+    };
+    setSettings(updated);
+    setTempSettings(updated);
+    syncStateToServer(rooms, updated);
   };
 
   return (
@@ -982,36 +984,39 @@ export default function App() {
       {/* FLOATING ACTION BAR (Top-Right / Minimal & Discrete for Presenter) */}
       {/* ========================================================================= */}
       <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-70 hover:opacity-100 transition-opacity duration-200">
-        {/* Real-time Multi-Device Connection Indicator Badge */}
-        <div
+        {/* Real-time Multi-Device Connection Indicator Badge with Force-Sync Click */}
+        <button
+          type="button"
+          onClick={() => fetchServerState(false)}
           title={
             connectionStatus === 'connected'
-              ? `Tersinkronisasi Real-Time: ${connectedDevices} perangkat aktif terkoneksi`
-              : 'Menyambungkan ke server sinkronisasi multi-perangkat...'
+              ? `Tersinkronisasi Real-Time (${connectedDevices} perangkat aktif). Klik untuk sinkronkan ulang.`
+              : 'Menyambungkan ke server... Klik untuk coba sambungkan sekarang.'
           }
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-[11px] font-bold backdrop-blur-md border transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-[11px] font-bold backdrop-blur-md border transition-all cursor-pointer hover:scale-105 active:scale-95 ${
             connectionStatus === 'connected'
               ? isDark
-                ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300'
-                : 'bg-emerald-50/90 border-emerald-300 text-emerald-700 shadow-xs'
-              : 'bg-amber-100/90 dark:bg-amber-950/60 border-amber-300 text-amber-700 dark:text-amber-300 shadow-xs'
+                ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/80'
+                : 'bg-emerald-50/90 border-emerald-300 text-emerald-700 shadow-xs hover:bg-emerald-100'
+              : 'bg-amber-100/90 dark:bg-amber-950/60 border-amber-300 text-amber-700 dark:text-amber-300 shadow-xs hover:bg-amber-200/90'
           }`}
         >
           {connectionStatus === 'connected' ? (
             <>
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
               <Wifi className="w-3 h-3 text-emerald-500 shrink-0" />
-              <span className="hidden sm:inline font-mono">
-                {connectedDevices > 1 ? `${connectedDevices} Perangkat` : 'Terkoneksi'}
+              <span className="font-mono">
+                {connectedDevices > 1 ? `${connectedDevices} Perangkat` : 'Online'}
               </span>
+              <RefreshCw className={`w-2.5 h-2.5 text-emerald-600/70 ${isSyncing ? 'animate-spin' : ''}`} />
             </>
           ) : (
             <>
               <RefreshCw className="w-3 h-3 animate-spin text-amber-500 shrink-0" />
-              <span className="hidden sm:inline">Menyambungkan...</span>
+              <span>Coba Sinkron...</span>
             </>
           )}
-        </div>
+        </button>
 
         {/* Quick Palette Background Switcher */}
         <div className="relative">
