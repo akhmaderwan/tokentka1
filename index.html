@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Display Token Ujian SMAN 2 Pasuruan</title>
+    <meta name="description" content="Aplikasi display proyektor Token Ujian dan TKA SMAN 2 Kota Pasuruan (SMADAPAS) dengan layout multi-ruang dan panel admin ber-PIN." />
+    <meta property="og:title" content="Display Token Ujian SMAN 2 Pasuruan" />
+    <meta property="og:description" content="Aplikasi display proyektor Token Ujian dan TKA SMAN 2 Kota Pasuruan (SMADAPAS) dengan layout multi-ruang dan panel admin ber-PIN." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@600;700&family=Plus+Jakarta+Sans:ital,wght@0,600;0,700;0,800;0,900;1,800;1,900&family=Titan+One&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        if (typeof console !== 'undefined') {
+          const isNoisy = (args) => args.some(a => typeof a === 'string' && (a.includes('[vite]') || a.includes('WebSocket') || a.includes('HMR') || a.includes('downloading')));
+          const origInfo = console.info;
+          console.info = function(...args) {
+            if (isNoisy(args)) return;
+            origInfo.apply(console, args);
+          };
+          const origLog = console.log;
+          console.log = function(...args) {
+            if (isNoisy(args)) return;
+            origLog.apply(console, args);
+          };
+          const origWarn = console.warn;
+          console.warn = function(...args) {
+            if (isNoisy(args)) return;
+            origWarn.apply(console, args);
+          };
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

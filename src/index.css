@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .token-3d-text {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    font-weight: 900;
+    font-style: italic;
+    color: #e81922;
+    letter-spacing: 0.04em;
+    text-shadow:
+      1.5px 1.5px 0 #000,
+      -1px -1px 0 #000,
+      1px -1px 0 #000,
+      -1px 1px 0 #000,
+      3px 3px 0 #000,
+      4px 4px 0 #000,
+      5px 5px 0 #00e5ff,
+      6px 6px 0 #00d2eb,
+      7px 7px 0 #00b8cc;
+  }
+
+  .token-3d-text-dark {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    font-weight: 900;
+    font-style: italic;
+    color: #ff333a;
+    letter-spacing: 0.04em;
+    text-shadow:
+      1.5px 1.5px 0 #000,
+      -1px -1px 0 #000,
+      1px -1px 0 #000,
+      -1px 1px 0 #000,
+      3px 3px 0 #000,
+      4px 4px 0 #000,
+      5px 5px 0 #00e5ff,
+      6px 6px 0 #00d2eb,
+      7px 7px 0 #00b8cc;
+  }
+
+  .room-title-text {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    font-weight: 900;
+    color: #e5a519;
+    letter-spacing: 0.05em;
+  }
+}
+
+@keyframes tokenPop {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-token-pop {
+  animation: tokenPop 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

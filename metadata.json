@@ -1,0 +1,6 @@
+{
+  "name": "Display Token Ujian SMAN 2 Pasuruan",
+  "description": "Aplikasi display proyektor Token Ujian dan TKA SMAN 2 Kota Pasuruan (SMADAPAS) dengan layout multi-ruang dan panel admin ber-PIN.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
