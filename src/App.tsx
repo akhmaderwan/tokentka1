@@ -24,7 +24,11 @@ import {
   Image as ImageIcon,
   Wifi,
   WifiOff,
-  Users
+  Users,
+  Zap,
+  Send,
+  ArrowDownCircle,
+  ChevronDown
 } from 'lucide-react';
 
 import studentsWavingImg from './assets/images/students_waving_1791251366893.jpg';
@@ -290,13 +294,20 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
   const [connectedDevices, setConnectedDevices] = useState<number>(1);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [isSyncMenuOpen, setIsSyncMenuOpen] = useState<boolean>(false);
   const clientIdRef = useRef<string>('client-' + Math.random().toString(36).substring(2, 9));
   const isRemoteSyncingRef = useRef<boolean>(false);
   const hasInitialLoadedRef = useRef<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
   const broadcastChannelRef = useRef<BroadcastChannel | null>(null);
-  const lastUpdatedRef = useRef<number>(Date.now());
+  const lastUpdatedRef = useRef<number>(0);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // References keeping current live state accessible across async closures without stale capture
+  const roomsRef = useRef<RoomConfig[]>(rooms);
+  roomsRef.current = rooms;
+  const settingsRef = useRef<AppSettings>(settings);
+  settingsRef.current = settings;
 
   // Tracks rooms that recently updated tokens for flash highlight animation
   const [recentlyUpdatedTokens, setRecentlyUpdatedTokens] = useState<Record<string, number>>({});
@@ -361,18 +372,24 @@ export default function App() {
     }
   };
 
-  // Explicit broadcast function called ONLY when a user actively changes settings or tokens
-  const syncStateToServer = (updatedRooms: RoomConfig[], updatedSettings: AppSettings) => {
-    if (isRemoteSyncingRef.current) return;
+  // PUSH SYNC: Explicitly broadcasts current/specified tokens to ALL other devices (Projector, Laptops, Mobile)
+  const handlePushSyncToServer = async (
+    targetRooms?: RoomConfig[],
+    targetSettings?: AppSettings,
+    notifyMessage = '✅ Token berhasil disinkronkan ke perangkat lain!'
+  ) => {
+    setIsSyncing(true);
+    const roomsToSync = targetRooms || roomsRef.current;
+    const settingsToSync = targetSettings || settingsRef.current;
     const now = Date.now();
     lastUpdatedRef.current = now;
 
     // Cache locally
     try {
-      localStorage.setItem('smadapas_token_rooms', JSON.stringify(updatedRooms));
-      localStorage.setItem('smadapas_token_settings', JSON.stringify(updatedSettings));
-      lastPolledRoomsStr.current = JSON.stringify(updatedRooms);
-      lastPolledSettingsStr.current = JSON.stringify(updatedSettings);
+      localStorage.setItem('smadapas_token_rooms', JSON.stringify(roomsToSync));
+      localStorage.setItem('smadapas_token_settings', JSON.stringify(settingsToSync));
+      lastPolledRoomsStr.current = JSON.stringify(roomsToSync);
+      lastPolledSettingsStr.current = JSON.stringify(settingsToSync);
     } catch {}
 
     // 1. WebSocket broadcast to all connected devices instantly (< 50ms)
@@ -381,8 +398,8 @@ export default function App() {
         wsRef.current.send(
           JSON.stringify({
             type: 'update_state',
-            rooms: updatedRooms,
-            settings: updatedSettings,
+            rooms: roomsToSync,
+            settings: settingsToSync,
             lastUpdated: now,
             source: clientIdRef.current,
           })
@@ -397,46 +414,65 @@ export default function App() {
       try {
         broadcastChannelRef.current.postMessage({
           type: 'update_state',
-          rooms: updatedRooms,
-          settings: updatedSettings,
+          rooms: roomsToSync,
+          settings: settingsToSync,
           lastUpdated: now,
           source: clientIdRef.current,
         });
       } catch {}
     }
 
-    // 3. HTTP REST fallback with persistence
+    // 3. HTTP REST POST with persistence to disk & server-side broadcast
     try {
-      fetch('/api/state', {
+      const res = await fetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rooms: updatedRooms,
-          settings: updatedSettings,
+          rooms: roomsToSync,
+          settings: settingsToSync,
           lastUpdated: now,
         }),
-      }).catch(() => {});
-    } catch {}
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (typeof json.connectedDevices === 'number') {
+          setConnectedDevices(Math.max(1, json.connectedDevices));
+        }
+        showToast(notifyMessage);
+        triggerConfetti();
+      } else {
+        showToast('⚠️ Gagal menyimpan ke server');
+      }
+    } catch {
+      showToast('⚠️ Gagal menghubungi server');
+    }
 
     // 4. External Cloud Sync (if configured)
-    if (updatedSettings.cloudSyncEnabled && updatedSettings.cloudSyncUrl?.trim()) {
+    if (settingsToSync.cloudSyncEnabled && settingsToSync.cloudSyncUrl?.trim()) {
       try {
         const cloudHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (updatedSettings.cloudSyncApiKey?.trim()) {
-          cloudHeaders['Authorization'] = `Bearer ${updatedSettings.cloudSyncApiKey.trim()}`;
-          cloudHeaders['X-Master-Key'] = updatedSettings.cloudSyncApiKey.trim();
+        if (settingsToSync.cloudSyncApiKey?.trim()) {
+          cloudHeaders['Authorization'] = `Bearer ${settingsToSync.cloudSyncApiKey.trim()}`;
+          cloudHeaders['X-Master-Key'] = settingsToSync.cloudSyncApiKey.trim();
         }
-        fetch(updatedSettings.cloudSyncUrl.trim(), {
+        fetch(settingsToSync.cloudSyncUrl.trim(), {
           method: 'POST',
           headers: cloudHeaders,
           body: JSON.stringify({
-            rooms: updatedRooms,
-            settings: updatedSettings,
+            rooms: roomsToSync,
+            settings: settingsToSync,
             lastUpdated: now,
           }),
         }).catch(() => {});
       } catch {}
     }
+
+    setIsSyncing(false);
+  };
+
+  // Alias for backward compatibility with settings/color pickers
+  const syncStateToServer = (updatedRooms: RoomConfig[], updatedSettings: AppSettings) => {
+    handlePushSyncToServer(updatedRooms, updatedSettings, 'Pengaturan disinkronkan ke semua perangkat');
   };
 
   // Sync rooms and settings to localStorage
@@ -456,11 +492,13 @@ export default function App() {
   ) => {
     isRemoteSyncingRef.current = true;
 
-    // Check if any room token actually changed
+    // Check if any room token actually changed compared to current active state
     let tokenChanged = false;
     let changedRoomName = '';
+    const currentActiveRooms = roomsRef.current;
+
     for (const r of remoteRooms) {
-      const existing = rooms.find((x) => x.id === r.id);
+      const existing = currentActiveRooms.find((x) => x.id === r.id);
       if (existing && existing.token !== r.token && r.isActive) {
         tokenChanged = true;
         changedRoomName = r.name;
@@ -486,9 +524,9 @@ export default function App() {
       if (remoteSettings.soundEnabled) {
         playToneNotification();
       }
-      showToast(`Token ${changedRoomName || 'Ujian'} diperbarui dari perangkat lain!`);
+      showToast(`⚡ Token ${changedRoomName || 'Ujian'} diperbarui dari perangkat lain!`);
     } else if (!isInit) {
-      showToast('Tampilan disinkronkan dengan perangkat lain');
+      showToast('⚡ Tampilan disinkronkan dengan perangkat lain');
     }
 
     setTimeout(() => {
@@ -500,8 +538,11 @@ export default function App() {
   const lastPolledRoomsStr = useRef<string>(JSON.stringify(rooms));
   const lastPolledSettingsStr = useRef<string>(JSON.stringify(settings));
 
-  // 1. Fetch server state with force option
-  const fetchServerState = async (silent: boolean = true) => {
+  // Fetch server state with options (silent, force)
+  const fetchServerState = async (options?: { force?: boolean; silent?: boolean }) => {
+    const force = options?.force ?? false;
+    const silent = options?.silent ?? true;
+
     setIsSyncing(true);
     try {
       const res = await fetch('/api/state?t=' + Date.now());
@@ -511,26 +552,38 @@ export default function App() {
           setConnectedDevices(Math.max(1, json.connectedDevices));
         }
         if (json.state && Array.isArray(json.state.rooms)) {
-          const isNewer = json.state.lastUpdated > lastUpdatedRef.current;
-          if (isNewer || !hasInitialLoadedRef.current) {
+          const remoteRoomsStr = JSON.stringify(json.state.rooms);
+          const remoteSettingsStr = JSON.stringify(json.state.settings);
+          const localRoomsStr = JSON.stringify(roomsRef.current);
+          const localSettingsStr = JSON.stringify(settingsRef.current);
+
+          const hasDataDifference = remoteRoomsStr !== localRoomsStr || remoteSettingsStr !== localSettingsStr;
+          const isNewer = (json.state.lastUpdated || 0) > lastUpdatedRef.current;
+
+          if (force || isNewer || hasDataDifference || !hasInitialLoadedRef.current) {
             hasInitialLoadedRef.current = true;
             lastUpdatedRef.current = json.state.lastUpdated || Date.now();
-            applyRemoteState(json.state.rooms, json.state.settings, !isNewer);
+            applyRemoteState(json.state.rooms, json.state.settings, !hasDataDifference && !isNewer);
             if (!silent) {
-              showToast('Data token disinkronkan dari server!');
+              showToast('✅ Data token disinkronkan dari server!');
             }
           } else if (!silent) {
-            showToast('Data sudah versi terbaru');
+            showToast('✅ Data sudah versi terbaru');
           }
         }
       } else if (!silent) {
-        showToast('Gagal menghubungi server sinkronisasi');
+        showToast('⚠️ Gagal menghubungi server sinkronisasi');
       }
-    } catch (e) {
-      if (!silent) showToast('Gagal melakukan sinkronisasi');
+    } catch {
+      if (!silent) showToast('⚠️ Gagal melakukan sinkronisasi');
     } finally {
       setIsSyncing(false);
     }
+  };
+
+  // PULL SYNC: Explicitly pull latest tokens from server (for presenter/projector)
+  const handlePullSyncFromServer = async () => {
+    await fetchServerState({ force: true, silent: false });
   };
 
   // 2. window.addEventListener('storage') - Instant cross-tab sync when localStorage changes
@@ -560,7 +613,7 @@ export default function App() {
     let isUnmounted = false;
 
     // Immediately fetch authoritative server state on mount
-    fetchServerState(true);
+    fetchServerState({ force: false, silent: true });
 
     const connectWs = () => {
       try {
@@ -573,7 +626,7 @@ export default function App() {
           if (isUnmounted) return;
           setConnectionStatus('connected');
           ws?.send(JSON.stringify({ type: 'get_state' }));
-          fetchServerState(true);
+          fetchServerState({ force: false, silent: true });
         };
 
         ws.onmessage = (event) => {
@@ -629,9 +682,9 @@ export default function App() {
       }
     } catch {}
 
-    // Polling fallback every 1.5 seconds (1500ms) to guarantee cross-device sync even if WS drops
+    // Polling fallback every 1 second (1000ms) to guarantee cross-device sync even if WS drops
     const pollInterval = setInterval(() => {
-      fetchServerState(true);
+      fetchServerState({ force: false, silent: true });
 
       // If custom cloud sync is enabled, poll it as well
       if (settings.cloudSyncEnabled && settings.cloudSyncUrl?.trim()) {
@@ -653,7 +706,7 @@ export default function App() {
             .catch(() => {});
         } catch {}
       }
-    }, 1500);
+    }, 1000);
 
     return () => {
       isUnmounted = true;
@@ -984,39 +1037,112 @@ export default function App() {
       {/* FLOATING ACTION BAR (Top-Right / Minimal & Discrete for Presenter) */}
       {/* ========================================================================= */}
       <div className="absolute top-2.5 right-3.5 z-40 flex items-center gap-1.5 print:hidden opacity-70 hover:opacity-100 transition-opacity duration-200">
-        {/* Real-time Multi-Device Connection Indicator Badge with Force-Sync Click */}
-        <button
-          type="button"
-          onClick={() => fetchServerState(false)}
-          title={
-            connectionStatus === 'connected'
-              ? `Tersinkronisasi Real-Time (${connectedDevices} perangkat aktif). Klik untuk sinkronkan ulang.`
-              : 'Menyambungkan ke server... Klik untuk coba sambungkan sekarang.'
-          }
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-[11px] font-bold backdrop-blur-md border transition-all cursor-pointer hover:scale-105 active:scale-95 ${
-            connectionStatus === 'connected'
-              ? isDark
-                ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/80'
-                : 'bg-emerald-50/90 border-emerald-300 text-emerald-700 shadow-xs hover:bg-emerald-100'
-              : 'bg-amber-100/90 dark:bg-amber-950/60 border-amber-300 text-amber-700 dark:text-amber-300 shadow-xs hover:bg-amber-200/90'
-          }`}
-        >
-          {connectionStatus === 'connected' ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-              <Wifi className="w-3 h-3 text-emerald-500 shrink-0" />
-              <span className="font-mono">
-                {connectedDevices > 1 ? `${connectedDevices} Perangkat` : 'Online'}
-              </span>
-              <RefreshCw className={`w-2.5 h-2.5 text-emerald-600/70 ${isSyncing ? 'animate-spin' : ''}`} />
-            </>
-          ) : (
-            <>
-              <RefreshCw className="w-3 h-3 animate-spin text-amber-500 shrink-0" />
-              <span>Coba Sinkron...</span>
-            </>
+        {/* Real-time Multi-Device Sync Button with Action Menu */}
+        <div className="relative">
+          <div className="flex items-center rounded-full backdrop-blur-md border border-emerald-400/50 shadow-xs overflow-hidden transition-all">
+            <button
+              type="button"
+              onClick={() => handlePushSyncToServer(undefined, undefined, '⚡ Token berhasil disinkronkan ke perangkat lain!')}
+              title="Klik untuk mengirim token di layar ini ke semua proyektor & HP lain secara instan"
+              className={`flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold transition-all cursor-pointer hover:opacity-90 active:scale-95 ${
+                connectionStatus === 'connected'
+                  ? isDark
+                    ? 'bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900/90'
+                    : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                  : 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 hover:bg-amber-200'
+              }`}
+            >
+              <Zap className={`w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0 ${isSyncing ? 'animate-bounce' : ''}`} />
+              <span>Sinkronkan Token</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              <RefreshCw className={`w-3 h-3 text-emerald-600/80 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
+            </button>
+
+            {/* Dropdown toggle for options */}
+            <button
+              type="button"
+              onClick={() => setIsSyncMenuOpen((v) => !v)}
+              title="Pilihan Sinkronisasi (Kirim / Tarik Token)"
+              className={`px-1.5 py-1 border-l transition-all cursor-pointer ${
+                isDark
+                  ? 'bg-emerald-950/90 border-emerald-800 text-emerald-300 hover:bg-emerald-900'
+                  : 'bg-emerald-100/90 border-emerald-300 text-emerald-800 hover:bg-emerald-200'
+              }`}
+            >
+              <ChevronDown className={`w-3 h-3 transition-transform ${isSyncMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
+
+          {/* Sync Options Dropdown */}
+          {isSyncMenuOpen && (
+            <div className="absolute right-0 top-full mt-2 w-72 p-3 rounded-2xl shadow-2xl border backdrop-blur-xl z-50 animate-token-pop bg-white/95 dark:bg-slate-900/95 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100">
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-200 dark:border-slate-800">
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+                  Menu Sinkronisasi Real-Time
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-bold">
+                  {connectedDevices} Perangkat
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSyncMenuOpen(false);
+                    handlePushSyncToServer(undefined, undefined, '⚡ Token berhasil disinkronkan ke semua perangkat & proyektor!');
+                  }}
+                  className="w-full text-left p-2.5 rounded-xl hover:bg-emerald-50 dark:hover:bg-emerald-950/40 border border-transparent hover:border-emerald-300 dark:hover:border-emerald-700 transition flex items-start gap-2.5 cursor-pointer"
+                >
+                  <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5">
+                    <Zap className="w-4 h-4 fill-current" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold block text-emerald-900 dark:text-emerald-200">
+                      ⚡ Kirim Token ke Semua Layar (Push)
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-tight">
+                      Kirim token di layar ini ke proyektor aula & HP pengawas seketika.
+                    </span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSyncMenuOpen(false);
+                    handlePullSyncFromServer();
+                  }}
+                  className="w-full text-left p-2.5 rounded-xl hover:bg-blue-50 dark:hover:bg-blue-950/40 border border-transparent hover:border-blue-300 dark:hover:border-blue-700 transition flex items-start gap-2.5 cursor-pointer"
+                >
+                  <div className="p-1.5 rounded-lg bg-blue-500/20 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5">
+                    <ArrowDownCircle className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold block text-blue-900 dark:text-blue-200">
+                      📥 Ambil Token dari Server (Pull)
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-tight">
+                      Perbarui token di layar ini jika proyektor belum menerima update terbaru.
+                    </span>
+                  </div>
+                </button>
+              </div>
+
+              <div className="mt-2.5 pt-2 border-t border-slate-200/80 dark:border-slate-800 text-[10px] text-slate-400 flex items-center justify-between">
+                <span>Status: {connectionStatus === 'connected' ? '🟢 Online (Terhubung)' : '🟡 Menghubungkan...'}</span>
+                <button
+                  type="button"
+                  onClick={() => setIsSyncMenuOpen(false)}
+                  className="font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
+            </div>
           )}
-        </button>
+        </div>
 
         {/* Quick Palette Background Switcher */}
         <div className="relative">
@@ -1452,20 +1578,29 @@ export default function App() {
                     })()}
 
                     {/* Quick Action buttons below token */}
-                    <div className="mt-1 sm:mt-2 flex items-center gap-2 opacity-30 hover:opacity-100 transition-opacity">
+                    <div className="mt-1 sm:mt-2 flex items-center gap-2 opacity-40 hover:opacity-100 transition-opacity">
                       <button
                         onClick={() => handleSpeakToken(room.name, room.token)}
                         title="Dengarkan pembacaan token"
-                        className="p-1 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                        className="p-1 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition cursor-pointer"
                       >
                         <Volume2 className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
                       </button>
                       <button
                         onClick={() => handleCopyToken(room.id, room.token)}
                         title="Salin token"
-                        className="p-1 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+                        className="p-1 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition cursor-pointer"
                       >
                         <Copy className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          handlePushSyncToServer(undefined, undefined, `⚡ Token ${room.name} (${room.token}) dikirim ke semua layar!`);
+                        }}
+                        title="Sinkronkan token ruangan ini ke semua proyektor & HP"
+                        className="p-1 rounded-full hover:bg-emerald-100 dark:hover:bg-emerald-950/60 transition cursor-pointer text-emerald-600 dark:text-emerald-400"
+                      >
+                        <Zap className="w-3.5 h-3.5 fill-current" />
                       </button>
                     </div>
                   </div>
@@ -1741,9 +1876,21 @@ export default function App() {
                     </span>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 self-start sm:self-center shrink-0 px-2.5 py-1 rounded-lg bg-white/90 dark:bg-slate-800/90 border border-emerald-500/30 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 shadow-xs">
-                  <Users className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>{connectedDevices} Perangkat Aktif</span>
+                <div className="flex items-center gap-2 self-start sm:self-center shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handlePushSyncToServer(tempRooms, tempSettings, '⚡ Token berhasil disinkronkan ke layar proyektor & semua perangkat!');
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm transition active:scale-95 cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5 fill-current text-amber-300" />
+                    <span>Sinkronkan ke Proyektor</span>
+                  </button>
+                  <div className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/90 dark:bg-slate-800/90 border border-emerald-500/30 text-[11px] font-bold text-emerald-700 dark:text-emerald-300 shadow-xs">
+                    <Users className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>{connectedDevices} Perangkat</span>
+                  </div>
                 </div>
               </div>
 
@@ -2215,9 +2362,20 @@ export default function App() {
                               type="button"
                               onClick={() => handleRandomizeTempToken(index)}
                               title="Acak Kode Token Baru"
-                              className="px-2.5 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 rounded-lg text-slate-700 dark:text-slate-200 transition shrink-0"
+                              className="px-2.5 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 rounded-lg text-slate-700 dark:text-slate-200 transition shrink-0 cursor-pointer"
                             >
                               <RefreshCw className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handlePushSyncToServer(tempRooms, tempSettings, `⚡ Token ${room.name} (${room.token}) langsung dikirim ke layar proyektor!`);
+                              }}
+                              title="Kirim token ruangan ini langsung ke proyektor aula & HP sekarang"
+                              className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition shrink-0 flex items-center gap-1 text-xs font-bold shadow-xs cursor-pointer"
+                            >
+                              <Zap className="w-3.5 h-3.5 fill-current text-amber-300" />
+                              <span className="hidden sm:inline">Kirim ke Layar</span>
                             </button>
                           </div>
                         </div>
@@ -2472,9 +2630,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleSaveAdmin}
-                  className="px-5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-md transition"
+                  className="px-5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-md transition flex items-center gap-1.5 cursor-pointer active:scale-95"
                 >
-                  Simpan & Tampilkan
+                  <Zap className="w-4 h-4 fill-current text-amber-300" />
+                  <span>Simpan & Sinkronkan ke Semua Layar</span>
                 </button>
               </div>
             </div>
