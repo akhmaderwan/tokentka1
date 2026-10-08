@@ -343,6 +343,55 @@ app.post('/api/tokens', handleUpdateState);
 app.put('/api/state', handleUpdateState);
 app.put('/api/sync', handleUpdateState);
 
+import { execSync } from 'child_process';
+
+function ensureNginxConfig() {
+  try {
+    const nginxConfPath = '/etc/nginx/nginx.conf';
+    if (fs.existsSync(nginxConfPath)) {
+      let content = fs.readFileSync(nginxConfPath, 'utf8');
+      if (!content.includes('location /api/')) {
+        const target = '# Serve the app for all other paths.\n        location / {';
+        const proxyBlocks = `location /api/ {
+            proxy_pass http://localhost:3000;
+            proxy_set_header Host localhost:3000;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /ws {
+            proxy_pass http://localhost:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host localhost:3000;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+
+        # Serve the app for all other paths.
+        location / {`;
+        if (content.includes(target)) {
+          content = content.replace(target, proxyBlocks);
+          fs.writeFileSync(nginxConfPath, content, 'utf8');
+          try {
+            execSync('nginx -t && nginx -s reload', { stdio: 'ignore' });
+            console.log('Nginx config updated and reloaded for direct /api and /ws proxy.');
+          } catch {}
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('ensureNginxConfig info:', err?.message || err);
+  }
+}
+
 const isProd = process.env.NODE_ENV === 'production';
 const port = parseInt(process.env.PORT || '3000', 10);
 
@@ -354,6 +403,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 async function startServer() {
+  ensureNginxConfig();
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
