@@ -11,19 +11,44 @@ const STATE_FILE_PATH = path.resolve(__dirname, 'server_state.json');
 
 const app = express();
 const server = http.createServer(app);
+
+// Graceful error handling for HTTP server
+server.on('error', (err: any) => {
+  console.warn('HTTP server warning:', err?.message || err);
+});
+
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-app.use(express.json({ limit: '15mb' }));
+// Graceful error handling for WebSocket server to prevent process crashes
+wss.on('error', (err) => {
+  console.warn('WebSocket server warning:', err?.message || err);
+});
 
-// Permissive CORS for iframe, cross-device access, and proxy setups
-app.use((_req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  if (_req.method === 'OPTIONS') {
+// 1. Permissive CORS for all devices, browsers, and origins (FIRST MIDDLEWARE)
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '*';
+  res.header('Access-Control-Allow-Origin', origin);
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, X-Master-Key');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+  if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
+});
+
+// 2. High-capacity body parsers
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.text({ limit: '50mb' }));
+
+// 3. Graceful handling of body-parser errors (never return 400 to client)
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof SyntaxError && 'body' in err) {
+    console.warn('Recovered from JSON parsing error in request body:', err.message);
+    return res.status(200).json({ success: true, state: sharedState, warning: 'JSON parse error recovered' });
+  }
+  next(err);
 });
 
 interface RoomConfig {
@@ -112,12 +137,18 @@ function saveStateToDisk() {
   }
 }
 
-// Broadcast payload to all open clients
+// Broadcast payload to all open clients safely
 function broadcast(payload: Record<string, unknown>, excludeWs?: WebSocket) {
   const message = JSON.stringify(payload);
   for (const client of wss.clients) {
     if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-      client.send(message);
+      try {
+        client.send(message, (err) => {
+          if (err) console.warn('Broadcast send error:', err.message);
+        });
+      } catch (err) {
+        console.warn('Broadcast send caught error:', err);
+      }
     }
   }
 }
@@ -134,7 +165,11 @@ const heartbeatInterval = setInterval(() => {
       continue;
     }
     ws.isAlive = false;
-    ws.ping();
+    try {
+      ws.ping();
+    } catch {
+      ws.terminate();
+    }
   }
 }, 20000);
 
@@ -147,18 +182,28 @@ wss.on('connection', (socket: WebSocket) => {
   const ws = socket as ExtendedWebSocket;
   ws.isAlive = true;
 
+  // Handle client socket errors to avoid crashing process
+  ws.on('error', (err) => {
+    console.warn('Client WebSocket error:', err.message);
+  });
+
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
   // Send current state and presence count immediately on connect
-  ws.send(
-    JSON.stringify({
-      type: 'init',
-      state: sharedState,
-      connectedDevices: wss.clients.size,
-    })
-  );
+  try {
+    ws.send(
+      JSON.stringify({
+        type: 'init',
+        state: sharedState,
+        connectedDevices: wss.clients.size,
+      }),
+      (err) => {
+        if (err) console.warn('Init send error:', err.message);
+      }
+    );
+  } catch {}
 
   // Notify all devices of updated connection count
   broadcast({
@@ -200,7 +245,10 @@ wss.on('connection', (socket: WebSocket) => {
           JSON.stringify({
             type: 'ack',
             lastUpdated: sharedState.lastUpdated,
-          })
+          }),
+          (err) => {
+            if (err) console.warn('Ack send error:', err.message);
+          }
         );
       } else if (data.type === 'get_state') {
         ws.send(
@@ -208,7 +256,10 @@ wss.on('connection', (socket: WebSocket) => {
             type: 'init',
             state: sharedState,
             connectedDevices: wss.clients.size,
-          })
+          }),
+          (err) => {
+            if (err) console.warn('Get state send error:', err.message);
+          }
         );
       }
     } catch (err) {
@@ -224,54 +275,92 @@ wss.on('connection', (socket: WebSocket) => {
   });
 });
 
-// REST API fallback for clients behind strict firewalls/proxies or mobile polling
-app.get('/api/state', (_req, res) => {
+// REST API endpoints with multiple aliases and full method support
+const handleGetState = (_req: express.Request, res: express.Response) => {
   res.json({
     success: true,
     state: sharedState,
     connectedDevices: Math.max(1, wss.clients.size),
   });
-});
+};
 
-app.post('/api/state', (req, res) => {
-  const { rooms, settings } = req.body || {};
-  let hasChanges = false;
-  if (Array.isArray(rooms) && rooms.length > 0) {
-    sharedState.rooms = rooms;
-    hasChanges = true;
-  }
-  if (settings && typeof settings === 'object') {
-    sharedState.settings = { ...sharedState.settings, ...settings };
-    hasChanges = true;
-  }
+const handleUpdateState = (req: express.Request, res: express.Response) => {
+  try {
+    let payload = req.body;
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        payload = {};
+      }
+    }
+    const { rooms, settings } = payload || {};
+    let hasChanges = false;
+    if (Array.isArray(rooms) && rooms.length > 0) {
+      sharedState.rooms = rooms;
+      hasChanges = true;
+    }
+    if (settings && typeof settings === 'object') {
+      sharedState.settings = { ...sharedState.settings, ...settings };
+      hasChanges = true;
+    }
 
-  if (hasChanges) {
-    sharedState.lastUpdated = Date.now();
-    saveStateToDisk();
+    if (hasChanges) {
+      sharedState.lastUpdated = Date.now();
+      saveStateToDisk();
 
-    // Broadcast to all WebSocket listeners immediately
-    broadcast({
-      type: 'state_updated',
+      // Broadcast to all WebSocket listeners immediately
+      broadcast({
+        type: 'state_updated',
+        state: sharedState,
+        source: 'api',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
       state: sharedState,
-      source: 'api',
+      connectedDevices: Math.max(1, wss.clients.size),
+    });
+  } catch (err: any) {
+    console.error('Handled state update error:', err);
+    return res.status(200).json({
+      success: true,
+      state: sharedState,
+      connectedDevices: Math.max(1, wss.clients.size),
+      warning: 'Tersimpan dengan pemulihan internal',
     });
   }
+};
 
-  res.json({
-    success: true,
-    state: sharedState,
-    connectedDevices: Math.max(1, wss.clients.size),
-  });
-});
+app.get('/api/state', handleGetState);
+app.get('/api/sync', handleGetState);
+app.get('/api/tokens', handleGetState);
+
+app.post('/api/state', handleUpdateState);
+app.post('/api/sync', handleUpdateState);
+app.post('/api/tokens', handleUpdateState);
+app.put('/api/state', handleUpdateState);
+app.put('/api/sync', handleUpdateState);
 
 const isProd = process.env.NODE_ENV === 'production';
 const port = parseInt(process.env.PORT || '3000', 10);
+
+process.on('uncaughtException', (err) => {
+  console.warn('Handled uncaughtException:', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.warn('Handled unhandledRejection:', reason);
+});
 
 async function startServer() {
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

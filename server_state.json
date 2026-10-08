@@ -5,18 +5,6 @@
       "name": "AULA 2",
       "token": "ZMQOUL",
       "isActive": true
-    },
-    {
-      "id": "aula-1",
-      "name": "AULA 1",
-      "token": "OVBOWK",
-      "isActive": true
-    },
-    {
-      "id": "multimedia",
-      "name": "MULTIMEDIA",
-      "token": "KTR7LP",
-      "isActive": false
     }
   ],
   "settings": {
@@ -37,5 +25,5 @@
     "cloudSyncUrl": "",
     "cloudSyncApiKey": ""
   },
-  "lastUpdated": 1791422289416
+  "lastUpdated": 1791424928977
 }

@@ -192,12 +192,19 @@ function generateRandomToken(length = 6): string {
   return result;
 }
 
-// Native Web Audio chime (no external audio file required)
+// Native Web Audio chime (no external audio file required, safe singleton)
+let sharedAudioCtx: AudioContext | null = null;
 function playToneNotification() {
   try {
     const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
+    if (!sharedAudioCtx || sharedAudioCtx.state === 'closed') {
+      sharedAudioCtx = new AudioContextClass();
+    }
+    const ctx = sharedAudioCtx;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
     const now = ctx.currentTime;
 
     // Tone 1: E5 (659.25Hz)
@@ -308,6 +315,8 @@ export default function App() {
   roomsRef.current = rooms;
   const settingsRef = useRef<AppSettings>(settings);
   settingsRef.current = settings;
+  const isAdminOpenRef = useRef<boolean>(isAdminOpen);
+  isAdminOpenRef.current = isAdminOpen;
 
   // Tracks rooms that recently updated tokens for flash highlight animation
   const [recentlyUpdatedTokens, setRecentlyUpdatedTokens] = useState<Record<string, number>>({});
@@ -372,6 +381,20 @@ export default function App() {
     }
   };
 
+  // Helper to format API URLs with auth tokens and cookies for cross-device support
+  const getApiUrl = (endpoint: string) => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('__aistudio_auth_token') || sessionStorage.getItem('aistudio_auth_token');
+      if (token) {
+        sessionStorage.setItem('aistudio_auth_token', token);
+        const sep = endpoint.includes('?') ? '&' : '?';
+        return `${endpoint}${sep}__aistudio_auth_token=${encodeURIComponent(token)}`;
+      }
+    } catch {}
+    return endpoint;
+  };
+
   // PUSH SYNC: Explicitly broadcasts current/specified tokens to ALL other devices (Projector, Laptops, Mobile)
   const handlePushSyncToServer = async (
     targetRooms?: RoomConfig[],
@@ -393,6 +416,7 @@ export default function App() {
     } catch {}
 
     // 1. WebSocket broadcast to all connected devices instantly (< 50ms)
+    let wsSent = false;
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(
@@ -404,8 +428,9 @@ export default function App() {
             source: clientIdRef.current,
           })
         );
+        wsSent = true;
       } catch (e) {
-        console.error('Failed to send WS message:', e);
+        console.warn('Failed to send WS message:', e);
       }
     }
 
@@ -422,29 +447,54 @@ export default function App() {
       } catch {}
     }
 
-    // 3. HTTP REST POST with persistence to disk & server-side broadcast
-    try {
-      const res = await fetch('/api/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rooms: roomsToSync,
-          settings: settingsToSync,
-          lastUpdated: now,
-        }),
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (typeof json.connectedDevices === 'number') {
-          setConnectedDevices(Math.max(1, json.connectedDevices));
+    // 3. HTTP REST POST with persistence, retry, and multi-endpoint fallback
+    let httpSuccess = false;
+    const endpoints = ['/api/state', '/api/sync'];
+    const payload = JSON.stringify({
+      rooms: roomsToSync,
+      settings: settingsToSync,
+      lastUpdated: now,
+    });
+
+    for (const ep of endpoints) {
+      if (httpSuccess) break;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch(getApiUrl(ep), {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: payload,
+          });
+
+          if (res.ok) {
+            httpSuccess = true;
+            setConnectionStatus('connected');
+            try {
+              const json = await res.json();
+              if (typeof json.connectedDevices === 'number') {
+                setConnectedDevices(Math.max(1, json.connectedDevices));
+              }
+            } catch {}
+            break;
+          } else {
+            console.warn(`Sync ${ep} attempt ${attempt + 1} status:`, res.status);
+          }
+        } catch (err) {
+          console.warn(`Sync ${ep} attempt ${attempt + 1} error:`, err);
         }
-        showToast(notifyMessage);
-        triggerConfetti();
-      } else {
-        showToast('⚠️ Gagal menyimpan ke server');
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
-    } catch {
-      showToast('⚠️ Gagal menghubungi server');
+    }
+
+    if (httpSuccess || wsSent) {
+      showToast(notifyMessage);
+      triggerConfetti();
+    } else {
+      showToast('⚠️ Gagal menyimpan ke server, periksa koneksi');
     }
 
     // 4. External Cloud Sync (if configured)
@@ -508,8 +558,11 @@ export default function App() {
 
     setRooms(remoteRooms);
     setSettings(remoteSettings);
-    setTempRooms(remoteRooms);
-    setTempSettings(remoteSettings);
+    // Protect admin unsaved edits from being overwritten by incoming poll/ws
+    if (!isAdminOpenRef.current) {
+      setTempRooms(remoteRooms);
+      setTempSettings(remoteSettings);
+    }
     setLastUpdated(Date.now());
 
     try {
@@ -544,41 +597,54 @@ export default function App() {
     const silent = options?.silent ?? true;
 
     setIsSyncing(true);
-    try {
-      const res = await fetch('/api/state?t=' + Date.now());
-      if (res.ok) {
-        const json = await res.json();
-        if (typeof json.connectedDevices === 'number') {
-          setConnectedDevices(Math.max(1, json.connectedDevices));
-        }
-        if (json.state && Array.isArray(json.state.rooms)) {
-          const remoteRoomsStr = JSON.stringify(json.state.rooms);
-          const remoteSettingsStr = JSON.stringify(json.state.settings);
-          const localRoomsStr = JSON.stringify(roomsRef.current);
-          const localSettingsStr = JSON.stringify(settingsRef.current);
+    const endpoints = ['/api/state?t=' + Date.now(), '/api/sync?t=' + Date.now()];
+    let fetchedState: any = null;
 
-          const hasDataDifference = remoteRoomsStr !== localRoomsStr || remoteSettingsStr !== localSettingsStr;
-          const isNewer = (json.state.lastUpdated || 0) > lastUpdatedRef.current;
-
-          if (force || isNewer || hasDataDifference || !hasInitialLoadedRef.current) {
-            hasInitialLoadedRef.current = true;
-            lastUpdatedRef.current = json.state.lastUpdated || Date.now();
-            applyRemoteState(json.state.rooms, json.state.settings, !hasDataDifference && !isNewer);
-            if (!silent) {
-              showToast('✅ Data token disinkronkan dari server!');
+    for (const ep of endpoints) {
+      if (fetchedState) break;
+      try {
+        const res = await fetch(getApiUrl(ep), {
+          credentials: 'include',
+          headers: { 'Accept': 'application/json' },
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.state && Array.isArray(json.state.rooms)) {
+            fetchedState = json;
+            setConnectionStatus('connected');
+            if (typeof json.connectedDevices === 'number') {
+              setConnectedDevices(Math.max(1, json.connectedDevices));
             }
-          } else if (!silent) {
-            showToast('✅ Data sudah versi terbaru');
           }
         }
-      } else if (!silent) {
-        showToast('⚠️ Gagal menghubungi server sinkronisasi');
-      }
-    } catch {
-      if (!silent) showToast('⚠️ Gagal melakukan sinkronisasi');
-    } finally {
-      setIsSyncing(false);
+      } catch {}
     }
+
+    if (fetchedState && fetchedState.state) {
+      const state = fetchedState.state;
+      const remoteRoomsStr = JSON.stringify(state.rooms);
+      const remoteSettingsStr = JSON.stringify(state.settings);
+      const localRoomsStr = JSON.stringify(roomsRef.current);
+      const localSettingsStr = JSON.stringify(settingsRef.current);
+
+      const hasDataDifference = remoteRoomsStr !== localRoomsStr || remoteSettingsStr !== localSettingsStr;
+      const isNewer = (state.lastUpdated || 0) > lastUpdatedRef.current;
+
+      if (force || isNewer || hasDataDifference || !hasInitialLoadedRef.current) {
+        hasInitialLoadedRef.current = true;
+        lastUpdatedRef.current = state.lastUpdated || Date.now();
+        applyRemoteState(state.rooms, state.settings, !hasDataDifference && !isNewer);
+        if (!silent) {
+          showToast('✅ Data token disinkronkan dari server!');
+        }
+      } else if (!silent) {
+        showToast('✅ Data sudah versi terbaru');
+      }
+    } else if (!silent) {
+      showToast('⚠️ Gagal menghubungi server sinkronisasi');
+    }
+
+    setIsSyncing(false);
   };
 
   // PULL SYNC: Explicitly pull latest tokens from server (for presenter/projector)
@@ -902,11 +968,37 @@ export default function App() {
   };
 
   const handleCopyToken = (id: string, token: string) => {
-    navigator.clipboard.writeText(token);
-    setCopiedId(id);
-    triggerConfetti();
-    showToast(`Token ${token} disalin ke clipboard!`);
-    setTimeout(() => setCopiedId(null), 2000);
+    const onSuccess = () => {
+      setCopiedId(id);
+      triggerConfetti();
+      showToast(`Token ${token} disalin ke clipboard!`);
+      setTimeout(() => setCopiedId(null), 2000);
+    };
+
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(token).then(onSuccess).catch(() => {
+        fallbackCopyText(token, onSuccess);
+      });
+    } else {
+      fallbackCopyText(token, onSuccess);
+    }
+  };
+
+  const fallbackCopyText = (text: string, onSuccess?: () => void) => {
+    try {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.setAttribute('readonly', '');
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      if (onSuccess) onSuccess();
+    } catch {
+      showToast(`Gagal menyalin token: ${text}`);
+    }
   };
 
   // Keyboard shortcuts for PC screen display (F for fullscreen, A for admin, D for dark mode, +/- for token size)
