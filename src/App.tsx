@@ -344,8 +344,24 @@ export default function App() {
     message: '',
   });
 
+  // Helper to format API URLs with auth tokens and cookies for cross-device support
+  const getApiUrl = (endpoint: string) => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('__aistudio_auth_token') || sessionStorage.getItem('aistudio_auth_token');
+      if (token) {
+        sessionStorage.setItem('aistudio_auth_token', token);
+        const sep = endpoint.includes('?') ? '&' : '?';
+        return `${endpoint}${sep}__aistudio_auth_token=${encodeURIComponent(token)}`;
+      }
+    } catch {}
+    return endpoint;
+  };
+
   const handleTestCloudConnection = async () => {
-    const targetUrl = tempSettings.cloudSyncUrl?.trim() || '/api/state';
+    const rawTarget = tempSettings.cloudSyncUrl?.trim() || '/api/state';
+    const isInternal = rawTarget.startsWith('/') || rawTarget.includes(window.location.host);
+    const targetUrl = isInternal ? getApiUrl(rawTarget) : rawTarget;
     setCloudTestState({ status: 'testing', message: 'Sedang menghubungi endpoint...' });
     try {
       const headers: Record<string, string> = {
@@ -358,6 +374,7 @@ export default function App() {
 
       const res = await fetch(targetUrl, {
         method: 'GET',
+        credentials: isInternal ? 'include' : 'same-origin',
         headers,
       });
 
@@ -379,20 +396,6 @@ export default function App() {
         message: 'Gagal terhubung: Periksa URL atau koneksi internet.',
       });
     }
-  };
-
-  // Helper to format API URLs with auth tokens and cookies for cross-device support
-  const getApiUrl = (endpoint: string) => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const token = params.get('__aistudio_auth_token') || sessionStorage.getItem('aistudio_auth_token');
-      if (token) {
-        sessionStorage.setItem('aistudio_auth_token', token);
-        const sep = endpoint.includes('?') ? '&' : '?';
-        return `${endpoint}${sep}__aistudio_auth_token=${encodeURIComponent(token)}`;
-      }
-    } catch {}
-    return endpoint;
   };
 
   // PUSH SYNC: Explicitly broadcasts current/specified tokens to ALL other devices (Projector, Laptops, Mobile)
@@ -684,7 +687,14 @@ export default function App() {
     const connectWs = () => {
       try {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        let wsUrl = `${protocol}//${window.location.host}/ws`;
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const token = params.get('__aistudio_auth_token') || sessionStorage.getItem('aistudio_auth_token');
+          if (token) {
+            wsUrl += `?__aistudio_auth_token=${encodeURIComponent(token)}`;
+          }
+        } catch {}
         ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
