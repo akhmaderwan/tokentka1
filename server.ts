@@ -4,10 +4,13 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { execSync } from 'child_process';
+import * as XLSX from 'xlsx';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const STATE_FILE_PATH = path.resolve(__dirname, 'server_state.json');
+const HISTORY_FILE_PATH = path.resolve(__dirname, 'tokens_history.json');
 
 const app = express();
 const server = http.createServer(app);
@@ -26,9 +29,13 @@ wss.on('error', (err) => {
 
 // 1. Permissive CORS for all devices, browsers, and origins (FIRST MIDDLEWARE)
 app.use((req, res, next) => {
-  const origin = req.headers.origin || '*';
-  res.header('Access-Control-Allow-Origin', origin);
-  res.header('Access-Control-Allow-Credentials', 'true');
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, X-Master-Key');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
   if (req.method === 'OPTIONS') {
@@ -50,6 +57,19 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
   }
   next(err);
 });
+
+export interface TokenHistoryEntry {
+  id: string;
+  timestamp: number;
+  formattedTime: string;
+  roomId: string;
+  roomName: string;
+  token: string;
+  oldToken?: string;
+  source: 'auto_generate' | 'manual_edit' | 'excel_import' | 'remote_sync';
+  device?: string;
+  isActive: boolean;
+}
 
 interface RoomConfig {
   id: string;
@@ -137,6 +157,208 @@ function saveStateToDisk() {
   }
 }
 
+// Token History Management
+let tokensHistory: TokenHistoryEntry[] = [];
+try {
+  if (fs.existsSync(HISTORY_FILE_PATH)) {
+    const rawHist = fs.readFileSync(HISTORY_FILE_PATH, 'utf-8');
+    const parsedHist = JSON.parse(rawHist);
+    if (Array.isArray(parsedHist)) {
+      tokensHistory = parsedHist;
+      console.log('Restored token history from disk:', tokensHistory.length, 'entries');
+    }
+  }
+} catch (e) {
+  console.warn('Could not load tokens history, starting fresh:', e);
+}
+
+function saveHistoryToDisk() {
+  try {
+    fs.writeFileSync(HISTORY_FILE_PATH, JSON.stringify(tokensHistory, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to write tokens history to disk:', err);
+  }
+}
+
+function formatWibTime(date: Date = new Date()): string {
+  try {
+    return (
+      new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(date) + ' WIB'
+    );
+  } catch {
+    return date.toLocaleString('id-ID') + ' WIB';
+  }
+}
+
+function recordTokenHistory(
+  roomId: string,
+  roomName: string,
+  newToken: string,
+  oldToken: string | undefined,
+  source: 'auto_generate' | 'manual_edit' | 'excel_import' | 'remote_sync',
+  device?: string,
+  isActive: boolean = true
+) {
+  const entry: TokenHistoryEntry = {
+    id: `tok-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    timestamp: Date.now(),
+    formattedTime: formatWibTime(new Date()),
+    roomId,
+    roomName,
+    token: newToken,
+    oldToken: oldToken || '-',
+    source,
+    device: device || 'Perangkat Pengawas',
+    isActive,
+  };
+
+  tokensHistory.unshift(entry);
+  if (tokensHistory.length > 2500) {
+    tokensHistory = tokensHistory.slice(0, 2500);
+  }
+  saveHistoryToDisk();
+  return entry;
+}
+
+function recordTokenChanges(
+  incomingRooms: RoomConfig[],
+  source: 'auto_generate' | 'manual_edit' | 'excel_import' | 'remote_sync' = 'manual_edit',
+  device?: string
+) {
+  const previousRoomsMap = new Map(sharedState.rooms.map((r) => [r.id, r]));
+  let recordedCount = 0;
+
+  for (const newRoom of incomingRooms) {
+    const prev = previousRoomsMap.get(newRoom.id);
+    if (!prev || prev.token !== newRoom.token) {
+      recordTokenHistory(
+        newRoom.id,
+        newRoom.name,
+        newRoom.token,
+        prev ? prev.token : undefined,
+        source,
+        device,
+        newRoom.isActive
+      );
+      recordedCount++;
+    }
+  }
+  return recordedCount;
+}
+
+// Seed initial history if empty
+if (tokensHistory.length === 0 && sharedState.rooms.length > 0) {
+  for (const r of sharedState.rooms) {
+    recordTokenHistory(
+      r.id,
+      r.name,
+      r.token,
+      undefined,
+      'auto_generate',
+      'Inisialisasi Sistem',
+      r.isActive
+    );
+  }
+}
+
+// Generate Excel Workbook Buffer with 3 comprehensive sheets
+function generateExcelBuffer(rooms: RoomConfig[], history: TokenHistoryEntry[]): Buffer {
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Database Token Terupdate (Riwayat Lengkap)
+  const historyRows = history.map((h, idx) => ({
+    'No': idx + 1,
+    'Waktu Update': h.formattedTime,
+    'Nama Ruangan': h.roomName,
+    'Token Baru': h.token,
+    'Token Lama': h.oldToken || '-',
+    'Status Ruangan': h.isActive ? 'Aktif' : 'Nonaktif',
+    'Sumber Update':
+      h.source === 'auto_generate'
+        ? 'Generate Otomatis'
+        : h.source === 'excel_import'
+        ? 'Import Excel'
+        : h.source === 'remote_sync'
+        ? 'Sinkronisasi Perangkat'
+        : 'Edit Manual',
+    'Perangkat / Keterangan': h.device || 'Pengawas',
+  }));
+  const wsHistory = XLSX.utils.json_to_sheet(
+    historyRows.length > 0
+      ? historyRows
+      : [
+          {
+            No: 1,
+            'Waktu Update': '-',
+            'Nama Ruangan': '-',
+            'Token Baru': '-',
+            'Token Lama': '-',
+            'Status Ruangan': '-',
+            'Sumber Update': '-',
+            'Perangkat / Keterangan': 'Belum ada data riwayat',
+          },
+        ]
+  );
+  wsHistory['!cols'] = [
+    { wch: 6 },
+    { wch: 25 },
+    { wch: 20 },
+    { wch: 15 },
+    { wch: 15 },
+    { wch: 16 },
+    { wch: 24 },
+    { wch: 26 },
+  ];
+  XLSX.utils.book_append_sheet(wb, wsHistory, 'Database Riwayat Token');
+
+  // Sheet 2: Token Aktif Saat Ini
+  const currentRows = rooms.map((r, idx) => ({
+    No: idx + 1,
+    'ID Ruangan': r.id,
+    'Nama Ruangan': r.name,
+    'Token Aktif': r.token,
+    Status: r.isActive ? 'AKTIF (Ditampilkan)' : 'NONAKTIF (Disembunyikan)',
+    'Terakhir Diperiksa': formatWibTime(new Date()),
+  }));
+  const wsCurrent = XLSX.utils.json_to_sheet(currentRows);
+  wsCurrent['!cols'] = [
+    { wch: 6 },
+    { wch: 16 },
+    { wch: 22 },
+    { wch: 16 },
+    { wch: 28 },
+    { wch: 25 },
+  ];
+  XLSX.utils.book_append_sheet(wb, wsCurrent, 'Token Aktif Saat Ini');
+
+  // Sheet 3: Template Import Excel
+  const templateRows = [
+    { 'Nama Ruangan': 'AULA 1', Token: 'AB12CD', 'Status (Y/N)': 'Y' },
+    { 'Nama Ruangan': 'AULA 2', Token: 'EF34GH', 'Status (Y/N)': 'Y' },
+    { 'Nama Ruangan': 'LAB MULTIMEDIA', Token: 'JK56LM', 'Status (Y/N)': 'N' },
+    { 'Nama Ruangan': 'RUANG 01', Token: 'PQ78RS', 'Status (Y/N)': 'Y' },
+    { 'Nama Ruangan': 'RUANG 02', Token: 'TU90VW', 'Status (Y/N)': 'Y' },
+  ];
+  const wsTemplate = XLSX.utils.json_to_sheet(templateRows);
+  wsTemplate['!cols'] = [
+    { wch: 22 },
+    { wch: 16 },
+    { wch: 16 },
+  ];
+  XLSX.utils.book_append_sheet(wb, wsTemplate, 'Template Import Token');
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  return buf;
+}
+
 // Broadcast payload to all open clients safely
 function broadcast(payload: Record<string, unknown>, excludeWs?: WebSocket) {
   const message = JSON.stringify(payload);
@@ -217,8 +439,19 @@ wss.on('connection', (socket: WebSocket) => {
       if (data.type === 'update_state') {
         let hasChanges = false;
         if (Array.isArray(data.rooms) && data.rooms.length > 0) {
+          const recorded = recordTokenChanges(
+            data.rooms,
+            (data.source as any) || 'remote_sync',
+            data.device
+          );
           sharedState.rooms = data.rooms;
           hasChanges = true;
+          if (recorded > 0) {
+            broadcast({
+              type: 'token_history_updated',
+              history: tokensHistory,
+            });
+          }
         }
         if (data.settings && typeof data.settings === 'object') {
           sharedState.settings = { ...sharedState.settings, ...data.settings };
@@ -261,6 +494,13 @@ wss.on('connection', (socket: WebSocket) => {
             if (err) console.warn('Get state send error:', err.message);
           }
         );
+      } else if (data.type === 'get_history') {
+        ws.send(
+          JSON.stringify({
+            type: 'token_history_updated',
+            history: tokensHistory,
+          })
+        );
       }
     } catch (err) {
       console.error('Failed to parse WebSocket message:', err);
@@ -297,8 +537,19 @@ const handleUpdateState = (req: express.Request, res: express.Response) => {
     const { rooms, settings } = payload || {};
     let hasChanges = false;
     if (Array.isArray(rooms) && rooms.length > 0) {
+      const recorded = recordTokenChanges(
+        rooms,
+        (payload.source as any) || 'remote_sync',
+        payload.device
+      );
       sharedState.rooms = rooms;
       hasChanges = true;
+      if (recorded > 0) {
+        broadcast({
+          type: 'token_history_updated',
+          history: tokensHistory,
+        });
+      }
     }
     if (settings && typeof settings === 'object') {
       sharedState.settings = { ...sharedState.settings, ...settings };
@@ -313,7 +564,7 @@ const handleUpdateState = (req: express.Request, res: express.Response) => {
       broadcast({
         type: 'state_updated',
         state: sharedState,
-        source: 'api',
+        source: payload.source || 'api',
       });
     }
 
@@ -321,6 +572,7 @@ const handleUpdateState = (req: express.Request, res: express.Response) => {
       success: true,
       state: sharedState,
       connectedDevices: Math.max(1, wss.clients.size),
+      message: 'Token berhasil disimpan di database server',
     });
   } catch (err: any) {
     console.error('Handled state update error:', err);
@@ -343,7 +595,114 @@ app.post('/api/tokens', handleUpdateState);
 app.put('/api/state', handleUpdateState);
 app.put('/api/sync', handleUpdateState);
 
-import { execSync } from 'child_process';
+// Token Database & Excel Routes
+app.get('/api/tokens/history', (_req, res) => {
+  res.json({
+    success: true,
+    history: tokensHistory,
+    count: tokensHistory.length,
+    lastUpdated: sharedState.lastUpdated,
+  });
+});
+
+app.post('/api/tokens/history', (req, res) => {
+  try {
+    const { entry, entries } = req.body || {};
+    if (entry && entry.roomId && entry.token) {
+      recordTokenHistory(
+        entry.roomId,
+        entry.roomName || entry.roomId,
+        entry.token,
+        entry.oldToken,
+        entry.source || 'manual_edit',
+        entry.device,
+        entry.isActive ?? true
+      );
+    } else if (Array.isArray(entries)) {
+      for (const e of entries) {
+        if (e.roomId && e.token) {
+          recordTokenHistory(
+            e.roomId,
+            e.roomName || e.roomId,
+            e.token,
+            e.oldToken,
+            e.source || 'manual_edit',
+            e.device,
+            e.isActive ?? true
+          );
+        }
+      }
+    }
+    broadcast({
+      type: 'token_history_updated',
+      history: tokensHistory,
+    });
+    res.json({ success: true, history: tokensHistory, count: tokensHistory.length });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Gagal menyimpan riwayat' });
+  }
+});
+
+app.delete('/api/tokens/history', (_req, res) => {
+  tokensHistory = [];
+  saveHistoryToDisk();
+  broadcast({
+    type: 'token_history_updated',
+    history: [],
+  });
+  res.json({ success: true, message: 'Riwayat token berhasil dibersihkan' });
+});
+
+app.get('/api/tokens/export-excel', (_req, res) => {
+  try {
+    const buffer = generateExcelBuffer(sharedState.rooms, tokensHistory);
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const filename = `Database_Token_Ujian_SMADAPAS_${dateStr}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(buffer);
+  } catch (err: any) {
+    console.error('Export Excel error:', err);
+    res.status(500).json({ success: false, error: 'Gagal membuat file Excel' });
+  }
+});
+
+app.post('/api/tokens/import-excel', (req, res) => {
+  try {
+    const { rooms: importedRooms, source, device } = req.body || {};
+    if (!Array.isArray(importedRooms) || importedRooms.length === 0) {
+      return res.status(400).json({ success: false, error: 'Daftar ruangan dari Excel kosong' });
+    }
+
+    recordTokenChanges(importedRooms, (source as any) || 'excel_import', device || 'Import Excel');
+
+    sharedState.rooms = importedRooms;
+    sharedState.lastUpdated = Date.now();
+    saveStateToDisk();
+
+    // Broadcast to all connected devices immediately
+    broadcast({
+      type: 'state_updated',
+      state: sharedState,
+      source: 'excel_import',
+    });
+    broadcast({
+      type: 'token_history_updated',
+      history: tokensHistory,
+    });
+
+    return res.json({
+      success: true,
+      message: `Berhasil mengimpor ${importedRooms.length} ruangan dari Excel`,
+      state: sharedState,
+      history: tokensHistory,
+    });
+  } catch (err: any) {
+    console.error('Import Excel error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memproses import Excel' });
+  }
+});
 
 function ensureNginxConfig() {
   try {

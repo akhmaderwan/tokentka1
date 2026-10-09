@@ -28,8 +28,11 @@ import {
   Zap,
   Send,
   ArrowDownCircle,
-  ChevronDown
+  ChevronDown,
+  FileSpreadsheet
 } from 'lucide-react';
+
+import { ExcelDatabaseModal, TokenHistoryEntry } from './components/ExcelDatabaseModal';
 
 import studentsWavingImg from './assets/images/students_waving_1791251366893.jpg';
 import studentsCelebratingImg from './assets/images/students_celebrating_1791251379726.jpg';
@@ -302,6 +305,8 @@ export default function App() {
   const [connectedDevices, setConnectedDevices] = useState<number>(1);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isSyncMenuOpen, setIsSyncMenuOpen] = useState<boolean>(false);
+  const [isExcelModalOpen, setIsExcelModalOpen] = useState<boolean>(false);
+  const [tokenHistory, setTokenHistory] = useState<TokenHistoryEntry[]>([]);
   const clientIdRef = useRef<string>('client-' + Math.random().toString(36).substring(2, 9));
   const isRemoteSyncingRef = useRef<boolean>(false);
   const hasInitialLoadedRef = useRef<boolean>(false);
@@ -335,6 +340,54 @@ export default function App() {
     }, 4500);
   };
 
+  // Fetch token history from database server
+  const fetchTokenHistory = async () => {
+    try {
+      const res = await fetch('/api/tokens/history', {
+        headers: { Accept: 'application/json' },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json && json.success && Array.isArray(json.history)) {
+          setTokenHistory(json.history);
+        }
+      }
+    } catch {}
+  };
+
+  const handleClearTokenHistory = async () => {
+    try {
+      const res = await fetch('/api/tokens/history', { method: 'DELETE' });
+      if (res.ok) {
+        setTokenHistory([]);
+      }
+    } catch {}
+  };
+
+  const handleApplyImportedRooms = async (importedRooms: RoomConfig[]) => {
+    setRooms(importedRooms);
+    setTempRooms(importedRooms);
+    await handlePushSyncToServer(
+      importedRooms,
+      undefined,
+      `✅ Berhasil menerapkan ${importedRooms.length} ruangan dari Excel!`
+    );
+    await fetchTokenHistory();
+  };
+
+  const handleApplySingleToken = async (roomId: string, newToken: string) => {
+    const updated = rooms.map((r) => (r.id === roomId ? { ...r, token: newToken } : r));
+    setRooms(updated);
+    setTempRooms(updated);
+    markRoomTokenUpdated(roomId);
+    await handlePushSyncToServer(
+      updated,
+      undefined,
+      `✅ Token ruangan diperbarui ke "${newToken}"!`
+    );
+    await fetchTokenHistory();
+  };
+
   // Cloud Sync Testing State
   const [cloudTestState, setCloudTestState] = useState<{
     status: 'idle' | 'testing' | 'success' | 'error';
@@ -365,7 +418,6 @@ export default function App() {
 
       const res = await fetch(targetUrl, {
         method: 'GET',
-        credentials: isInternal ? 'include' : 'same-origin',
         headers,
       });
 
@@ -401,13 +453,19 @@ export default function App() {
     const now = Date.now();
     lastUpdatedRef.current = now;
 
-    // Cache locally
+    // Cache locally immediately so user input is never lost
     try {
       localStorage.setItem('smadapas_token_rooms', JSON.stringify(roomsToSync));
       localStorage.setItem('smadapas_token_settings', JSON.stringify(settingsToSync));
       lastPolledRoomsStr.current = JSON.stringify(roomsToSync);
       lastPolledSettingsStr.current = JSON.stringify(settingsToSync);
     } catch {}
+
+    // Detect device type for history log
+    const deviceType =
+      typeof navigator !== 'undefined' && /Mobile|Android|iPhone|iPad/i.test(navigator.userAgent)
+        ? 'Perangkat HP / Ponsel'
+        : 'Laptop / Proyektor';
 
     // 1. WebSocket broadcast to all connected devices instantly (< 50ms)
     let wsSent = false;
@@ -420,6 +478,7 @@ export default function App() {
             settings: settingsToSync,
             lastUpdated: now,
             source: clientIdRef.current,
+            device: deviceType,
           })
         );
         wsSent = true;
@@ -437,17 +496,20 @@ export default function App() {
           settings: settingsToSync,
           lastUpdated: now,
           source: clientIdRef.current,
+          device: deviceType,
         });
       } catch {}
     }
 
     // 3. HTTP REST POST with persistence, retry, and multi-endpoint fallback
     let httpSuccess = false;
-    const endpoints = ['/api/state', '/api/sync'];
+    const endpoints = ['/api/state', '/api/sync', '/api/tokens'];
     const payload = JSON.stringify({
       rooms: roomsToSync,
       settings: settingsToSync,
       lastUpdated: now,
+      source: 'device_sync',
+      device: deviceType,
     });
 
     for (const ep of endpoints) {
@@ -456,7 +518,6 @@ export default function App() {
         try {
           const res = await fetch(getApiUrl(ep), {
             method: 'POST',
-            credentials: 'include',
             headers: {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
@@ -480,15 +541,18 @@ export default function App() {
         } catch (err) {
           console.warn(`Sync ${ep} attempt ${attempt + 1} error:`, err);
         }
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
     }
 
     if (httpSuccess || wsSent) {
+      setConnectionStatus('connected');
       showToast(notifyMessage);
       triggerConfetti();
+      fetchTokenHistory();
     } else {
-      showToast('⚠️ Gagal menyimpan ke server, periksa koneksi');
+      setConnectionStatus('connecting');
+      showToast('💾 Token disimpan di perangkat (Menghubungkan ke server...)');
     }
 
     // 4. External Cloud Sync (if configured)
@@ -672,8 +736,9 @@ export default function App() {
     let reconnectTimer: any = null;
     let isUnmounted = false;
 
-    // Immediately fetch authoritative server state on mount
+    // Immediately fetch authoritative server state and token history on mount
     fetchServerState({ force: false, silent: true });
+    fetchTokenHistory();
 
     const connectWs = () => {
       try {
@@ -686,7 +751,9 @@ export default function App() {
           if (isUnmounted) return;
           setConnectionStatus('connected');
           ws?.send(JSON.stringify({ type: 'get_state' }));
+          ws?.send(JSON.stringify({ type: 'get_history' }));
           fetchServerState({ force: false, silent: true });
+          fetchTokenHistory();
         };
 
         ws.onmessage = (event) => {
@@ -702,6 +769,9 @@ export default function App() {
             } else if (data.type === 'state_updated' && data.state) {
               lastUpdatedRef.current = data.state.lastUpdated || Date.now();
               applyRemoteState(data.state.rooms, data.state.settings, false);
+              fetchTokenHistory();
+            } else if (data.type === 'token_history_updated' && Array.isArray(data.history)) {
+              setTokenHistory(data.history);
             } else if (data.type === 'presence' && typeof data.connectedDevices === 'number') {
               setConnectedDevices(Math.max(1, data.connectedDevices));
             }
@@ -1337,6 +1407,26 @@ export default function App() {
           }`}
         >
           {isFullscreen ? <Minimize2 className="w-4 h-4 sm:w-5 sm:h-5" /> : <Maximize2 className="w-4 h-4 sm:w-5 sm:h-5" />}
+        </button>
+
+        {/* Database Excel Token Button */}
+        <button
+          onClick={() => setIsExcelModalOpen(true)}
+          title="Buka Database & Riwayat Token Excel (.xlsx)"
+          className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full font-bold text-xs backdrop-blur-md transition-all duration-200 border shadow-xs cursor-pointer active:scale-95 ${
+            isDark
+              ? 'bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border-emerald-700/60'
+              : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
+          }`}
+        >
+          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+          <span className="hidden sm:inline">Database Excel</span>
+          <span className="sm:hidden">Excel</span>
+          {tokenHistory.length > 0 && (
+            <span className="px-1.5 py-0.2 text-[9px] font-mono font-black rounded-full bg-emerald-600 text-white shrink-0">
+              {tokenHistory.length}
+            </span>
+          )}
         </button>
 
         {/* Admin Settings Button */}
@@ -1978,6 +2068,34 @@ export default function App() {
                     <span>{connectedDevices} Perangkat</span>
                   </div>
                 </div>
+              </div>
+
+              {/* Database Excel & Riwayat Token Quick Card */}
+              <div className="p-3.5 sm:p-4 rounded-xl border border-emerald-500/30 bg-emerald-50/60 dark:bg-emerald-950/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-emerald-600 text-white shadow-xs shrink-0">
+                    <FileSpreadsheet className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                      <span>Database Excel & Riwayat Token</span>
+                      <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-300">
+                        {tokenHistory.length} Token Tersimpan
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">
+                      Kelola histori token terupdate, import massal dari Excel (.xlsx), atau unduh spreadsheet resmi SMADAPAS.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsExcelModalOpen(true)}
+                  className="flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition shadow-sm active:scale-95 shrink-0 cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Buka Database Excel</span>
+                </button>
               </div>
 
               {/* Presets Button Bar */}
@@ -2726,6 +2844,20 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Excel Database Modal */}
+      <ExcelDatabaseModal
+        isOpen={isExcelModalOpen}
+        onClose={() => setIsExcelModalOpen(false)}
+        rooms={rooms}
+        history={tokenHistory}
+        onRefreshHistory={fetchTokenHistory}
+        onClearHistory={handleClearTokenHistory}
+        onApplyImportedRooms={handleApplyImportedRooms}
+        onApplySingleToken={handleApplySingleToken}
+        showToast={showToast}
+        connectionStatus={connectionStatus}
+      />
 
       {/* Toast Feedback Notification */}
       {toastMessage && (

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "tok-1791438749244-88iv6",
+    "timestamp": 1791438749244,
+    "formattedTime": "08/10/2026, 12.52.29 WIB",
+    "roomId": "multimedia",
+    "roomName": "LAB MULTIMEDIA",
+    "token": "KTR7LP",
+    "oldToken": "-",
+    "source": "auto_generate",
+    "device": "Sistem SMADAPAS",
+    "isActive": false
+  },
+  {
+    "id": "tok-1791438749243-gppfl",
+    "timestamp": 1791438749243,
+    "formattedTime": "08/10/2026, 12.52.29 WIB",
+    "roomId": "aula-2",
+    "roomName": "AULA 2",
+    "token": "ZMQOUL",
+    "oldToken": "BARU99",
+    "source": "auto_generate",
+    "device": "Sistem SMADAPAS",
+    "isActive": true
+  },
+  {
+    "id": "tok-1791438726911-zwc5a",
+    "timestamp": 1791438726911,
+    "formattedTime": "08/10/2026, 12.52.06 WIB",
+    "roomId": "aula-2",
+    "roomName": "AULA 2",
+    "token": "BARU99",
+    "oldToken": "ZMQOUL",
+    "source": "test_update",
+    "device": "HP Pengawas",
+    "isActive": true
+  },
+  {
+    "id": "tok-1791438368476-zv2oi",
+    "timestamp": 1791438368476,
+    "formattedTime": "08/10/2026, 12.46.08 WIB",
+    "roomId": "multimedia",
+    "roomName": "LAB MULTIMEDIA",
+    "token": "KTR7LP",
+    "oldToken": "-",
+    "source": "auto_generate",
+    "device": "Inisialisasi Sistem",
+    "isActive": false
+  },
+  {
+    "id": "tok-1791438368476-dtz6k",
+    "timestamp": 1791438368476,
+    "formattedTime": "08/10/2026, 12.46.08 WIB",
+    "roomId": "aula-1",
+    "roomName": "AULA 1",
+    "token": "OVBOWK",
+    "oldToken": "-",
+    "source": "auto_generate",
+    "device": "Inisialisasi Sistem",
+    "isActive": true
+  },
+  {
+    "id": "tok-1791438368454-02p4s",
+    "timestamp": 1791438368454,
+    "formattedTime": "08/10/2026, 12.46.08 WIB",
+    "roomId": "aula-2",
+    "roomName": "AULA 2",
+    "token": "ZMQOUL",
+    "oldToken": "-",
+    "source": "auto_generate",
+    "device": "Inisialisasi Sistem",
+    "isActive": true
+  }
+]
