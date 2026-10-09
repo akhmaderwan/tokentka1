@@ -605,6 +605,86 @@ app.get('/api/tokens/history', (_req, res) => {
   });
 });
 
+// Database Query API: filter and query token history & active rooms
+app.get('/api/tokens/query', (req, res) => {
+  try {
+    const q = ((req.query.q || req.query.search || '') as string).toLowerCase().trim();
+    const roomId = ((req.query.room || req.query.roomId || '') as string).toLowerCase().trim();
+    const source = ((req.query.source || '') as string).toLowerCase().trim();
+    const status = ((req.query.status || '') as string).toLowerCase().trim();
+    const limit = parseInt((req.query.limit || '100') as string, 10);
+    const format = ((req.query.format || 'json') as string).toLowerCase().trim();
+
+    let results = tokensHistory.filter((item) => {
+      if (roomId && item.roomId.toLowerCase() !== roomId && item.roomName.toLowerCase() !== roomId) {
+        return false;
+      }
+      if (source && item.source.toLowerCase() !== source) {
+        return false;
+      }
+      if (status === 'active' && !item.isActive) return false;
+      if (status === 'inactive' && item.isActive) return false;
+      if (q) {
+        const match =
+          item.token.toLowerCase().includes(q) ||
+          item.roomName.toLowerCase().includes(q) ||
+          (item.oldToken && item.oldToken.toLowerCase().includes(q)) ||
+          (item.device && item.device.toLowerCase().includes(q)) ||
+          item.formattedTime.toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    if (!isNaN(limit) && limit > 0) {
+      results = results.slice(0, limit);
+    }
+
+    if (format === 'excel' || format === 'xlsx') {
+      const wb = XLSX.utils.book_new();
+      const rows = results.map((r, i) => ({
+        No: i + 1,
+        'Waktu Update': r.formattedTime,
+        'Nama Ruangan': r.roomName,
+        'Token Baru': r.token,
+        'Token Lama': r.oldToken || '-',
+        'Sumber Update': r.source,
+        'Perangkat': r.device || '-',
+        'Status': r.isActive ? 'Aktif' : 'Nonaktif',
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, 'Hasil Queri Token');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="Hasil_Queri_Token.xlsx"');
+      return res.send(buf);
+    }
+
+    // Summary calculation
+    const byRoom: Record<string, number> = {};
+    const bySource: Record<string, number> = {};
+    tokensHistory.forEach((h) => {
+      byRoom[h.roomName] = (byRoom[h.roomName] || 0) + 1;
+      bySource[h.source] = (bySource[h.source] || 0) + 1;
+    });
+
+    return res.json({
+      success: true,
+      query: { q, roomId, source, status, limit },
+      totalInDatabase: tokensHistory.length,
+      matchedCount: results.length,
+      results,
+      summary: {
+        byRoom,
+        bySource,
+        activeRoomsCount: sharedState.rooms.filter((r) => r.isActive).length,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Gagal mengeksekusi queri' });
+  }
+});
+
 app.post('/api/tokens/history', (req, res) => {
   try {
     const { entry, entries } = req.body || {};

@@ -22,7 +22,12 @@ import {
   RotateCcw,
   Code2,
   Terminal,
-  FileCode
+  FileCode,
+  ArrowDownCircle,
+  Play,
+  Layers,
+  Sparkles,
+  ListFilter
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { RoomConfig } from '../App';
@@ -51,6 +56,7 @@ interface ExcelDatabaseModalProps {
   onApplySingleToken: (roomId: string, token: string) => Promise<void>;
   showToast: (msg: string) => void;
   connectionStatus: 'connected' | 'connecting' | 'disconnected';
+  onPullTokensFromServer?: () => Promise<void>;
 }
 
 export function ExcelDatabaseModal({
@@ -64,6 +70,7 @@ export function ExcelDatabaseModal({
   onApplySingleToken,
   showToast,
   connectionStatus,
+  onPullTokensFromServer,
 }: ExcelDatabaseModalProps) {
   const [activeTab, setActiveTab] = useState<'history' | 'import' | 'current' | 'sql'>('history');
   const [searchTerm, setSearchTerm] = useState('');
@@ -73,6 +80,21 @@ export function ExcelDatabaseModal({
   const [isExporting, setIsExporting] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [isPullingTokens, setIsPullingTokens] = useState(false);
+
+  // Database Query Hub state
+  const [querySubTab, setQuerySubTab] = useState<'runner' | 'schema'>('runner');
+  const [selectedPresetQuery, setSelectedPresetQuery] = useState<string>('history_50');
+  const [sqlQueryInput, setSqlQueryInput] = useState<string>(
+    'SELECT formatted_time, room_name, token, old_token, source, device FROM token_history ORDER BY timestamp DESC LIMIT 50;'
+  );
+  const [queryRoomFilter, setQueryRoomFilter] = useState<string>('all');
+  const [querySourceFilter, setQuerySourceFilter] = useState<string>('all');
+  const [queryStatusFilter, setQueryStatusFilter] = useState<string>('all');
+  const [queryKeyword, setQueryKeyword] = useState<string>('');
+  const [queryTimeFilter, setQueryTimeFilter] = useState<'all' | 'today' | '24h'>('all');
+  const [isExecutingQuery, setIsExecutingQuery] = useState<boolean>(false);
+  const [isExportingQueryExcel, setIsExportingQueryExcel] = useState<boolean>(false);
 
   // Import state
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -121,6 +143,19 @@ export function ExcelDatabaseModal({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const handlePullTokens = async () => {
+    if (!onPullTokensFromServer) return;
+    setIsPullingTokens(true);
+    try {
+      await onPullTokensFromServer();
+      showToast('✅ Berhasil mengambil token terbaru dari server!');
+    } catch {
+      showToast('⚠️ Gagal mengambil token dari server');
+    } finally {
+      setIsPullingTokens(false);
+    }
+  };
+
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
     try {
@@ -130,6 +165,240 @@ export function ExcelDatabaseModal({
       showToast('Gagal memperbarui database');
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  // Preset query selector with instant SQL preview
+  const handleSelectPresetQuery = (presetKey: string) => {
+    setSelectedPresetQuery(presetKey);
+    setIsExecutingQuery(true);
+    setTimeout(() => setIsExecutingQuery(false), 200);
+
+    switch (presetKey) {
+      case 'active_rooms':
+        setSqlQueryInput('SELECT id, name, token, is_active FROM rooms WHERE is_active = TRUE ORDER BY name ASC;');
+        break;
+      case 'history_50':
+        setSqlQueryInput(
+          'SELECT formatted_time, room_name, token, old_token, source, device FROM token_history ORDER BY timestamp DESC LIMIT 50;'
+        );
+        break;
+      case 'rekap_ruangan':
+        setSqlQueryInput(
+          'SELECT room_name, COUNT(*) AS total_pergantian, MAX(formatted_time) AS terakhir_update FROM token_history GROUP BY room_name ORDER BY total_pergantian DESC;'
+        );
+        break;
+      case 'source_auto':
+        setSqlQueryInput(
+          "SELECT formatted_time, room_name, token, device FROM token_history WHERE source = 'auto_generate' ORDER BY timestamp DESC;"
+        );
+        break;
+      case 'source_excel':
+        setSqlQueryInput(
+          "SELECT formatted_time, room_name, token, device FROM token_history WHERE source = 'excel_import' ORDER BY timestamp DESC;"
+        );
+        break;
+      case 'source_sync':
+        setSqlQueryInput(
+          "SELECT formatted_time, room_name, token, device FROM token_history WHERE source = 'remote_sync' ORDER BY timestamp DESC;"
+        );
+        break;
+      case 'token_changes':
+        setSqlQueryInput(
+          "SELECT room_name, token, old_token, formatted_time, device FROM token_history WHERE old_token IS NOT NULL AND old_token != '-' ORDER BY timestamp DESC;"
+        );
+        break;
+      default:
+        setSqlQueryInput('SELECT * FROM token_history ORDER BY timestamp DESC LIMIT 100;');
+    }
+  };
+
+  // Computed query results based on preset or active filters
+  const executedQueryResults = useMemo(() => {
+    if (selectedPresetQuery === 'active_rooms') {
+      return rooms
+        .filter((r) => {
+          if (queryStatusFilter === 'active' && !r.isActive) return false;
+          if (queryStatusFilter === 'inactive' && r.isActive) return false;
+          if (queryRoomFilter !== 'all' && r.id !== queryRoomFilter && r.name !== queryRoomFilter) return false;
+          if (queryKeyword) {
+            const kw = queryKeyword.toLowerCase();
+            return r.name.toLowerCase().includes(kw) || r.token.toLowerCase().includes(kw);
+          }
+          return true;
+        })
+        .map((r, idx) => ({
+          id: r.id,
+          no: idx + 1,
+          time: 'Aktif Saat Ini',
+          roomName: r.name,
+          token: r.token,
+          oldToken: '-',
+          source: 'Tabel Ruangan (rooms)',
+          device: 'Display Proyektor',
+          isActive: r.isActive,
+          rawRoomId: r.id,
+        }));
+    }
+
+    if (selectedPresetQuery === 'rekap_ruangan') {
+      const counts: Record<string, { count: number; lastToken: string; lastTime: string; roomId: string }> = {};
+      history.forEach((h) => {
+        if (!counts[h.roomName]) {
+          counts[h.roomName] = { count: 0, lastToken: h.token, lastTime: h.formattedTime, roomId: h.roomId };
+        }
+        counts[h.roomName].count += 1;
+      });
+      return Object.entries(counts)
+        .filter(([roomName]) => {
+          if (queryRoomFilter !== 'all' && roomName !== queryRoomFilter) return false;
+          if (queryKeyword) return roomName.toLowerCase().includes(queryKeyword.toLowerCase());
+          return true;
+        })
+        .map(([roomName, val], idx) => ({
+          id: `rekap-${idx}`,
+          no: idx + 1,
+          time: `Terakhir: ${val.lastTime}`,
+          roomName,
+          token: `${val.count}x Diperbarui (${val.lastToken})`,
+          oldToken: '-',
+          source: 'Agregasi Queri',
+          device: 'Statistik Rekap',
+          isActive: true,
+          rawRoomId: val.roomId,
+        }));
+    }
+
+    // Default: filtered token_history
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    return history
+      .filter((item) => {
+        if (selectedPresetQuery === 'source_auto' && item.source !== 'auto_generate') return false;
+        if (selectedPresetQuery === 'source_excel' && item.source !== 'excel_import') return false;
+        if (selectedPresetQuery === 'source_sync' && item.source !== 'remote_sync') return false;
+        if (selectedPresetQuery === 'token_changes' && (!item.oldToken || item.oldToken === '-')) return false;
+
+        // Custom filters
+        if (queryRoomFilter !== 'all' && item.roomId !== queryRoomFilter && item.roomName !== queryRoomFilter) {
+          return false;
+        }
+        if (querySourceFilter !== 'all' && item.source !== querySourceFilter) {
+          return false;
+        }
+        if (queryStatusFilter === 'active' && !item.isActive) return false;
+        if (queryStatusFilter === 'inactive' && item.isActive) return false;
+
+        if (queryTimeFilter === 'today' && item.timestamp < startOfToday.getTime()) return false;
+        if (queryTimeFilter === '24h' && item.timestamp < oneDayAgo) return false;
+
+        if (queryKeyword) {
+          const kw = queryKeyword.toLowerCase();
+          const match =
+            item.token.toLowerCase().includes(kw) ||
+            item.roomName.toLowerCase().includes(kw) ||
+            (item.oldToken && item.oldToken.toLowerCase().includes(kw)) ||
+            (item.device && item.device.toLowerCase().includes(kw)) ||
+            item.formattedTime.toLowerCase().includes(kw);
+          if (!match) return false;
+        }
+
+        return true;
+      })
+      .slice(0, selectedPresetQuery === 'history_50' ? 50 : 250)
+      .map((item, idx) => ({
+        id: item.id,
+        no: idx + 1,
+        time: item.formattedTime,
+        roomName: item.roomName,
+        token: item.token,
+        oldToken: item.oldToken || '-',
+        source:
+          item.source === 'auto_generate'
+            ? 'Generate Otomatis'
+            : item.source === 'excel_import'
+            ? 'Import Excel'
+            : item.source === 'remote_sync'
+            ? 'Sinkronisasi Multi-Perangkat'
+            : 'Edit Manual',
+        device: item.device || 'Pengawas',
+        isActive: item.isActive,
+        rawRoomId: item.roomId,
+      }));
+  }, [
+    rooms,
+    history,
+    selectedPresetQuery,
+    queryRoomFilter,
+    querySourceFilter,
+    queryStatusFilter,
+    queryTimeFilter,
+    queryKeyword,
+  ]);
+
+  const handleExportQueryResultsExcel = () => {
+    try {
+      if (executedQueryResults.length === 0) {
+        showToast('⚠️ Tidak ada data hasil queri untuk diekspor');
+        return;
+      }
+      setIsExportingQueryExcel(true);
+      const wb = XLSX.utils.book_new();
+      const rows = executedQueryResults.map((r) => ({
+        No: r.no,
+        'Waktu / Keterangan': r.time,
+        'Nama Ruangan': r.roomName,
+        'Token': r.token,
+        'Token Lama': r.oldToken,
+        'Sumber': r.source,
+        'Perangkat': r.device,
+        'Status': r.isActive ? 'Aktif' : 'Nonaktif',
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 6 },
+        { wch: 22 },
+        { wch: 20 },
+        { wch: 18 },
+        { wch: 14 },
+        { wch: 24 },
+        { wch: 22 },
+        { wch: 12 },
+      ];
+      XLSX.utils.book_append_sheet(wb, ws, 'Hasil Queri');
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      XLSX.writeFile(wb, `Hasil_Queri_Token_SMADAPAS_${selectedPresetQuery}_${dateStr}.xlsx`);
+      showToast(`✅ Berhasil mengekspor ${executedQueryResults.length} baris hasil queri ke Excel!`);
+    } catch {
+      showToast('⚠️ Gagal mengekspor hasil queri');
+    } finally {
+      setIsExportingQueryExcel(false);
+    }
+  };
+
+  const handleCopyQueryResults = (format: 'json' | 'csv') => {
+    try {
+      if (executedQueryResults.length === 0) {
+        showToast('⚠️ Tidak ada hasil queri untuk disalin');
+        return;
+      }
+      let content = '';
+      if (format === 'json') {
+        content = JSON.stringify(executedQueryResults, null, 2);
+      } else {
+        const headers = ['No', 'Waktu', 'Ruangan', 'Token', 'Token Lama', 'Sumber', 'Perangkat', 'Status'];
+        const csvRows = executedQueryResults.map((r) =>
+          [r.no, `"${r.time}"`, `"${r.roomName}"`, `"${r.token}"`, `"${r.oldToken}"`, `"${r.source}"`, `"${r.device}"`, r.isActive ? 'Aktif' : 'Nonaktif'].join(',')
+        );
+        content = [headers.join(','), ...csvRows].join('\n');
+      }
+      navigator.clipboard.writeText(content);
+      showToast(`📋 Berhasil menyalin ${executedQueryResults.length} baris hasil queri (${format.toUpperCase()})`);
+    } catch {
+      showToast('⚠️ Gagal menyalin hasil queri');
     }
   };
 
@@ -592,6 +861,19 @@ export function ExcelDatabaseModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {onPullTokensFromServer && (
+              <button
+                type="button"
+                onClick={handlePullTokens}
+                disabled={isPullingTokens}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-200 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 dark:hover:bg-blue-900 border border-blue-200 dark:border-blue-800 rounded-xl transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-50"
+                title="Ambil / Tarik token terbaru dari database server sekarang"
+              >
+                <ArrowDownCircle className={`w-4 h-4 text-blue-600 dark:text-blue-400 ${isPullingTokens ? 'animate-bounce' : ''}`} />
+                <span>{isPullingTokens ? 'Mengambil...' : 'Ambil Token Server'}</span>
+              </button>
+            )}
+
             <button
               onClick={handleExportExcel}
               disabled={isExporting}
@@ -669,8 +951,11 @@ export function ExcelDatabaseModal({
                   : 'border-transparent text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
               }`}
             >
-              <Code2 className="w-4 h-4" />
-              <span>Queri Database SQL</span>
+              <Terminal className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+              <span>Queri Database & SQL</span>
+              <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+                Interactive
+              </span>
             </button>
           </div>
 
@@ -1091,154 +1376,467 @@ export function ExcelDatabaseModal({
           </div>
         )}
 
-        {/* Tab 4: Queri Database SQL */}
+        {/* Tab 4: Queri Database & SQL */}
         {activeTab === 'sql' && (
-          <div className="flex-1 flex flex-col min-h-0 p-6 overflow-y-auto bg-slate-50/50 dark:bg-slate-950/30 space-y-5">
-            {/* Action Bar */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl gap-3">
-              <div className="flex items-start gap-3">
-                <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
-                  <Terminal className="w-5 h-5" />
-                </div>
-                <div>
-                  <h4 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Skema Relasional & Kumpulan Queri SQL
-                  </h4>
-                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
-                    Struktur tabel dan kumpulan perintah SQL siap pakai untuk PostgreSQL, MySQL / MariaDB, dan SQLite.
-                  </p>
-                </div>
-              </div>
+          <div className="flex-1 flex flex-col min-h-0 p-6 overflow-y-auto bg-slate-50/50 dark:bg-slate-950/30 space-y-4">
+            {/* Top Sub-Navigation for Query Hub */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800 gap-3">
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={handleCopySql}
-                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-750 rounded-xl transition-all shadow-xs cursor-pointer"
+                  onClick={() => setQuerySubTab('runner')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    querySubTab === 'runner'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                  }`}
                 >
-                  {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedSql ? 'Tersalin!' : 'Salin SQL'}</span>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Jalankan Queri Database (Live Runner)</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-white/20">
+                    {executedQueryResults.length}
+                  </span>
                 </button>
+
                 <button
                   type="button"
-                  onClick={handleDownloadSql}
-                  className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 rounded-xl transition-all shadow-xs shadow-emerald-600/20 cursor-pointer"
+                  onClick={() => setQuerySubTab('schema')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    querySubTab === 'schema'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                  }`}
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Unduh File SQL (.sql)</span>
+                  <FileCode className="w-3.5 h-3.5" />
+                  <span>Skema & Script SQL Lengkap (.sql)</span>
                 </button>
               </div>
-            </div>
 
-            {/* Structure Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                    TABEL: rooms
-                  </span>
-                  <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
-                    {rooms.length} Baris
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Menyimpan ruangan ujian, nama, token aktif, dan status aktif.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                    TABEL: token_history
-                  </span>
-                  <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
-                    {history.length} Catatan
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Menyimpan rekam jejak setiap pergantian token beserta waktu, sumber, dan perangkat.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                    TABEL: app_settings
-                  </span>
-                  <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
-                    Konfigurasi
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Menyimpan PIN admin, teks banner proyektor, teks footer, dan preferensi tema.
-                </p>
-              </div>
-            </div>
-
-            {/* Quick Query Snippets */}
-            <div className="space-y-2">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Pintasan Queri Cepat (Quick Queries):
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between">
-                  <div>
-                    <span className="font-bold text-slate-800 dark:text-slate-200 block">
-                      1. Ambil Token Aktif Proyektor
-                    </span>
-                    <code className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono">
-                      SELECT * FROM rooms WHERE is_active = TRUE;
-                    </code>
-                  </div>
+              {querySubTab === 'runner' && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => {
-                      navigator.clipboard.writeText('SELECT id, name, token FROM rooms WHERE is_active = TRUE ORDER BY name ASC;');
-                      showToast('Queri disalin ke clipboard');
-                    }}
-                    className="p-1.5 text-slate-400 hover:text-emerald-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                    title="Salin Queri"
+                    type="button"
+                    onClick={handleExportQueryResultsExcel}
+                    disabled={isExportingQueryExcel || executedQueryResults.length === 0}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 rounded-lg transition-all shadow-xs disabled:opacity-50 cursor-pointer"
+                    title="Unduh hanya data hasil queri yang ditampilkan ini ke Excel (.xlsx)"
                   >
-                    <Copy className="w-3.5 h-3.5" />
+                    <Download className={`w-3.5 h-3.5 ${isExportingQueryExcel ? 'animate-bounce' : ''}`} />
+                    <span>Ekspor Hasil Queri ke Excel (.xlsx)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleCopyQueryResults('csv')}
+                    disabled={executedQueryResults.length === 0}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+                    title="Salin hasil queri sebagai format CSV"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>CSV</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleCopyQueryResults('json')}
+                    disabled={executedQueryResults.length === 0}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+                    title="Salin hasil queri sebagai JSON"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>JSON</span>
                   </button>
                 </div>
+              )}
+            </div>
 
-                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between">
-                  <div>
-                    <span className="font-bold text-slate-800 dark:text-slate-200 block">
-                      2. Update Token Ruangan
-                    </span>
-                    <code className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono">
-                      UPDATE rooms SET token = 'NEW_TOKEN' WHERE id = '...';
-                    </code>
+            {/* SUB-TAB 1: LIVE QUERY RUNNER */}
+            {querySubTab === 'runner' && (
+              <div className="space-y-4">
+                {/* 1. Quick Query Presets */}
+                <div>
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 block mb-1.5">
+                    1. Pilih Perintah Queri Cepat (Query Presets):
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { key: 'history_50', label: '🕒 50 Update Terakhir', desc: 'Riwayat token terupdate' },
+                      { key: 'active_rooms', label: '🟢 Token Aktif Ruangan', desc: 'Semua ruangan aktif di proyektor' },
+                      { key: 'rekap_ruangan', label: '📊 Rekap Pergantian per Ruangan', desc: 'Agregasi count update' },
+                      { key: 'token_changes', label: '🔄 Token Lama vs Baru', desc: 'Pergantian token yang tercatat' },
+                      { key: 'source_auto', label: '🤖 Generate Otomatis', desc: 'Token acak otomatis sistem' },
+                      { key: 'source_excel', label: '📥 Import Excel', desc: 'Token hasil upload Excel' },
+                      { key: 'source_sync', label: '📱 Sinkronisasi Perangkat', desc: 'Token dari sinkronisasi multi-device' },
+                    ].map((preset) => {
+                      const isSelected = selectedPresetQuery === preset.key;
+                      return (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          onClick={() => handleSelectPresetQuery(preset.key)}
+                          className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-blue-600 text-white border-blue-600 shadow-xs scale-[1.02]'
+                              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-750'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText("UPDATE rooms SET token = 'ZMQOUL', updated_at = CURRENT_TIMESTAMP WHERE id = 'aula-2';");
-                      showToast('Queri disalin ke clipboard');
-                    }}
-                    className="p-1.5 text-slate-400 hover:text-emerald-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                    title="Salin Queri"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
+                </div>
+
+                {/* 2. SQL Syntax Display & Execute Console */}
+                <div className="p-3.5 bg-slate-950 text-slate-100 rounded-xl border border-slate-800 shadow-inner">
+                  <div className="flex items-center justify-between mb-2 pb-2 border-b border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <Terminal className="w-4 h-4 text-emerald-400" />
+                      <span className="text-xs font-mono font-bold text-slate-300">
+                        SQL Statement Console
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(sqlQueryInput);
+                          showToast('Queri SQL disalin');
+                        }}
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Salin SQL</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsExecutingQuery(true);
+                          setTimeout(() => {
+                            setIsExecutingQuery(false);
+                            showToast(`✅ Queri berhasil dijalankan (${executedQueryResults.length} baris)`);
+                          }, 150);
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition active:scale-95 cursor-pointer shadow-xs"
+                      >
+                        <Play className={`w-3 h-3 fill-current ${isExecutingQuery ? 'animate-spin' : ''}`} />
+                        <span>{isExecutingQuery ? 'Mengeksekusi...' : 'Jalankan Queri'}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    value={sqlQueryInput}
+                    onChange={(e) => setSqlQueryInput(e.target.value)}
+                    className="w-full bg-slate-900 px-3 py-2 rounded-lg font-mono text-xs text-emerald-400 border border-slate-700/80 outline-none focus:border-emerald-500"
+                    placeholder="Ketik perintah SQL (SELECT ... FROM ...)"
+                  />
+                </div>
+
+                {/* 3. Interactive Filter Bar */}
+                <div className="p-3.5 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xs">
+                  <div className="flex items-center gap-2 mb-2.5">
+                    <ListFilter className="w-4 h-4 text-blue-600" />
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                      Parameter & Filter Pencarian Data:
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
+                    {/* Room filter */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">Ruangan:</label>
+                      <select
+                        value={queryRoomFilter}
+                        onChange={(e) => setQueryRoomFilter(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-semibold outline-none"
+                      >
+                        <option value="all">Semua Ruangan</option>
+                        {roomOptions.map(([id, name]) => (
+                          <option key={id} value={id}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Source filter */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">Sumber Update:</label>
+                      <select
+                        value={querySourceFilter}
+                        onChange={(e) => setQuerySourceFilter(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-semibold outline-none"
+                      >
+                        <option value="all">Semua Sumber</option>
+                        <option value="auto_generate">Generate Otomatis</option>
+                        <option value="manual_edit">Edit Manual</option>
+                        <option value="excel_import">Import Excel</option>
+                        <option value="remote_sync">Sinkronisasi Cloud</option>
+                      </select>
+                    </div>
+
+                    {/* Status filter */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">Status Ruangan:</label>
+                      <select
+                        value={queryStatusFilter}
+                        onChange={(e) => setQueryStatusFilter(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-semibold outline-none"
+                      >
+                        <option value="all">Semua Status</option>
+                        <option value="active">Hanya Aktif</option>
+                        <option value="inactive">Nonaktif</option>
+                      </select>
+                    </div>
+
+                    {/* Time filter */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">Rentang Waktu:</label>
+                      <select
+                        value={queryTimeFilter}
+                        onChange={(e) => setQueryTimeFilter(e.target.value as any)}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 font-semibold outline-none"
+                      >
+                        <option value="all">Sepanjang Waktu</option>
+                        <option value="today">Hari Ini Saja</option>
+                        <option value="24h">24 Jam Terakhir</option>
+                      </select>
+                    </div>
+
+                    {/* Keyword Search */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-1">Kata Kunci:</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={queryKeyword}
+                          onChange={(e) => setQueryKeyword(e.target.value)}
+                          placeholder="Cari token, ruang..."
+                          className="w-full pl-7 pr-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs outline-none"
+                        />
+                        <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Results Grid Table */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                      Hasil Queri Database:
+                      <span className="ml-1 px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 font-mono font-bold text-[11px]">
+                        {executedQueryResults.length} Baris Ditemukan
+                      </span>
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Total database server: {history.length} catatan
+                    </span>
+                  </div>
+
+                  {executedQueryResults.length === 0 ? (
+                    <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 text-slate-400">
+                      <Database className="w-8 h-8 mx-auto mb-2 opacity-40 text-slate-400" />
+                      <p className="text-sm font-semibold">Tidak ada baris yang cocok dengan parameter queri.</p>
+                      <p className="text-xs mt-1">Coba ubah pilihan filter atau reset kata kunci pencarian.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 max-h-96 shadow-2xs">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-slate-100 dark:bg-slate-800/80 sticky top-0 text-slate-600 dark:text-slate-300 z-10 border-b border-slate-200 dark:border-slate-700">
+                          <tr>
+                            <th className="py-2.5 px-3 font-bold w-12 text-center">No</th>
+                            <th className="py-2.5 px-3 font-bold">Waktu Update</th>
+                            <th className="py-2.5 px-3 font-bold">Nama Ruangan</th>
+                            <th className="py-2.5 px-3 font-bold">Token Hasil Queri</th>
+                            <th className="py-2.5 px-3 font-bold">Token Lama</th>
+                            <th className="py-2.5 px-3 font-bold">Sumber</th>
+                            <th className="py-2.5 px-3 font-bold">Perangkat</th>
+                            <th className="py-2.5 px-3 font-bold text-center">Status</th>
+                            <th className="py-2.5 px-3 font-bold text-center w-28">Aksi</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {executedQueryResults.map((row) => (
+                            <tr
+                              key={row.id}
+                              className="hover:bg-blue-50/40 dark:hover:bg-blue-950/20 transition-colors"
+                            >
+                              <td className="py-2.5 px-3 text-center font-mono text-slate-400">
+                                {row.no}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                {row.time}
+                              </td>
+                              <td className="py-2.5 px-3 font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                                {row.roomName}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span className="inline-block px-2 py-0.5 font-mono font-black text-xs rounded bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700/60">
+                                  {row.token}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-[11px] text-slate-400">
+                                {row.oldToken}
+                              </td>
+                              <td className="py-2.5 px-3 text-[11px] text-slate-500 whitespace-nowrap">
+                                {row.source}
+                              </td>
+                              <td className="py-2.5 px-3 text-[11px] text-slate-400 whitespace-nowrap">
+                                {row.device}
+                              </td>
+                              <td className="py-2.5 px-3 text-center">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    row.isActive
+                                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                                      : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
+                                  }`}
+                                >
+                                  {row.isActive ? 'Aktif' : 'Nonaktif'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopy(row.token.split(' ')[0], row.id)}
+                                    title="Salin token ini"
+                                    className="p-1 rounded text-slate-500 hover:text-emerald-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                                  >
+                                    {copiedId === row.id ? (
+                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    ) : (
+                                      <Copy className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                  {row.rawRoomId && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const cleanToken = row.token.split(' ')[0].replace(/[^A-Za-z0-9]/g, '');
+                                        onApplySingleToken(row.rawRoomId!, cleanToken);
+                                      }}
+                                      title="Terapkan token ini ke layar proyektor sekarang"
+                                      className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-600 hover:bg-emerald-700 text-white transition active:scale-95 cursor-pointer"
+                                    >
+                                      Terapkan
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
+            )}
 
-            {/* Code Box */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                  <FileCode className="w-3.5 h-3.5 text-emerald-600" />
-                  Pratinjau Script SQL Lengkap:
-                </span>
-                <span className="text-[11px] text-slate-400">
-                  Tersedia file fisik di root proyek: <code>database_schema.sql</code>
-                </span>
+            {/* SUB-TAB 2: RELATIONAL SCHEMA & FULL SQL SCRIPT */}
+            {querySubTab === 'schema' && (
+              <div className="space-y-4">
+                {/* Action Bar */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
+                      <Terminal className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                        Skema Relasional & Kumpulan Queri SQL
+                      </h4>
+                      <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                        Struktur tabel DDL dan kumpulan perintah SQL siap pakai untuk PostgreSQL, MySQL / MariaDB, dan SQLite.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCopySql}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 rounded-xl transition-all shadow-xs cursor-pointer"
+                    >
+                      {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedSql ? 'Tersalin!' : 'Salin SQL'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadSql}
+                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 rounded-xl transition-all shadow-xs shadow-emerald-600/20 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Unduh File SQL (.sql)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Structure Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                        TABEL: rooms
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
+                        {rooms.length} Baris
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Menyimpan ruangan ujian, nama, token aktif, dan status aktif.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                        TABEL: token_history
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
+                        {history.length} Catatan
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Menyimpan rekam jejak setiap pergantian token beserta waktu, sumber, dan perangkat.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                        TABEL: app_settings
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-mono">
+                        Konfigurasi
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Menyimpan PIN admin, teks banner proyektor, teks footer, dan preferensi tema.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Code Box */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                      <FileCode className="w-3.5 h-3.5 text-emerald-600" />
+                      Pratinjau Script SQL Lengkap:
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Tersedia file fisik di root proyek: <code>database_schema.sql</code>
+                    </span>
+                  </div>
+                  <pre className="p-4 rounded-xl border border-slate-800 bg-slate-950 text-slate-200 font-mono text-xs overflow-x-auto max-h-80 select-all leading-relaxed shadow-inner">
+                    {generateSqlScript()}
+                  </pre>
+                </div>
               </div>
-              <pre className="p-4 rounded-xl border border-slate-800 bg-slate-950 text-slate-200 font-mono text-xs overflow-x-auto max-h-80 select-all leading-relaxed shadow-inner">
-                {generateSqlScript()}
-              </pre>
-            </div>
+            )}
           </div>
         )}
 
